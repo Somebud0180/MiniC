@@ -48,45 +48,49 @@ struct ContentView: View {
                 fileCreationName = ""
                 fileCreationType = .c
             }) {
-                NavigationStack {
-                    Form {
-                        VStack(alignment: .leading) {
-                            Text("File name")
-                                .font(.caption)
-                            TextField("Program", text: $fileCreationName)
-                        }
-                        
-                        Picker("File type", selection: $fileCreationType) {
-                            ForEach(FileType.allCases) { fileType in
-                                Text(fileType.name).tag(fileType.id)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        
-                        Button(action: {
-                            // Save and open new file
-                        }, label: {
-                            Text("Save")
-                                .padding(8)
-                                .frame(maxWidth: .infinity)
-                        })
-                        .tint(.blue)
-                        .buttonStyle(.borderedProminent)
-                    }
-                    .padding(.vertical, -16)
-                    .navigationTitle("Create New File")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button(action: {
-                                presentFileCreationDialog = false
-                            }, label: {
-                                Label("Cancel", systemImage: "xmark")
-                            })
-                        }
+                fileCreationView
+                    .presentationDetents([.fraction(0.42)])
+            }
+        }
+    }
+    
+    private var fileCreationView: some View {
+        NavigationStack {
+            Form {
+                VStack(alignment: .leading) {
+                    Text("File name")
+                        .font(.caption)
+                    TextField("Program", text: $fileCreationName)
+                }
+                
+                Picker("File type", selection: $fileCreationType) {
+                    ForEach(FileType.allCases) { fileType in
+                        Text(fileType.name).tag(fileType.id)
                     }
                 }
-                .presentationDetents([.fraction(0.42)])
+                .pickerStyle(.segmented)
+                
+                Button(action: {
+                    // Save and open new file
+                }, label: {
+                    Text("Save")
+                        .padding(8)
+                        .frame(maxWidth: .infinity)
+                })
+                .tint(.blue)
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.vertical, -16)
+            .navigationTitle("Create New File")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(action: {
+                        presentFileCreationDialog = false
+                    }, label: {
+                        Label("Cancel", systemImage: "xmark")
+                    })
+                }
             }
         }
     }
