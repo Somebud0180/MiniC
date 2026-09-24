@@ -41,7 +41,8 @@ struct CodeEditorView: View {
             } else {
                 codeEditorBody
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .safeAreaInset(edge: .bottom) {
+                    .ignoresSafeArea(edges: [.horizontal])
+                    .overlay(alignment: .bottom) {
                         codeEditorToolbar
                     }
             }
@@ -142,6 +143,7 @@ struct CodeEditorView: View {
                 .glassEffect()
         )
         .padding(.horizontal, 12)
+        .safeAreaPadding(.horizontal)
         .padding(.bottom, 8)
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
@@ -223,6 +225,7 @@ struct CodeEditorView: View {
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal)
+            .safeAreaPadding(.horizontal)
             .padding(.vertical, 8)
             .background(Color(uiColor: .secondarySystemBackground))
             
@@ -233,6 +236,7 @@ struct CodeEditorView: View {
                 text: $content,
                 isFocused: $isEditorFocused,
                 textInserter: $textInserter,
+                bottomPadding: 80,
                 onTextChange: {
                     scheduleAutosave()
                 }
@@ -318,6 +322,3 @@ struct CodeEditorView: View {
         // Simple autosave helper
     }
 }
-
-// MARK: - CodeEditorTextView (UIKit Integration)
-

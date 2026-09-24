@@ -5,6 +5,7 @@ struct CodeEditorTextView: UIViewRepresentable {
     @Binding var text: String
     @FocusState.Binding var isFocused: Bool
     @Binding var textInserter: ((String) -> Void)?
+    var bottomPadding: CGFloat = 80
     var onTextChange: (() -> Void)?
     
     func makeCoordinator() -> Coordinator {
@@ -13,6 +14,7 @@ struct CodeEditorTextView: UIViewRepresentable {
     
     func makeUIView(context: Context) -> CodeEditorContainerView {
         let container = CodeEditorContainerView()
+        container.bottomPadding = bottomPadding
         container.textView.delegate = context.coordinator
         
         container.onTextChanged = { newText in
@@ -33,6 +35,11 @@ struct CodeEditorTextView: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: CodeEditorContainerView, context: Context) {
+        if uiView.bottomPadding != bottomPadding {
+            uiView.bottomPadding = bottomPadding
+            uiView.updateInsetsAndGutter()
+        }
+        
         if uiView.textView.text != text {
             uiView.setText(text)
         }
@@ -78,7 +85,7 @@ struct CodeEditorTextView: UIViewRepresentable {
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             if let textView = scrollView as? UITextView,
                let container = textView.superview as? CodeEditorContainerView {
-                container.updateLineNumbers()
+                container.gutterView.setNeedsDisplay()
             }
         }
     }
@@ -92,6 +99,7 @@ class CodeEditorContainerView: UIView {
     private let dividerView = UIView()
     private var gutterWidthConstraint: NSLayoutConstraint?
     
+    var bottomPadding: CGFloat = 80
     var onTextChanged: ((String) -> Void)?
     
     override init(frame: CGRect) {
@@ -105,7 +113,7 @@ class CodeEditorContainerView: UIView {
     }
     
     private func setupViews() {
-        backgroundColor = .clear
+        backgroundColor = .systemBackground
         
         // Gutter styling & layout
         gutterView.backgroundColor = UIColor.tertiarySystemBackground
@@ -130,7 +138,6 @@ class CodeEditorContainerView: UIView {
         textView.alwaysBounceVertical = true
         textView.isScrollEnabled = true
         textView.showsVerticalScrollIndicator = true
-        textView.textContainerInset = UIEdgeInsets(top: 12, left: 8, bottom: 24, right: 8)
         textView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(textView)
         
@@ -140,7 +147,7 @@ class CodeEditorContainerView: UIView {
         self.gutterWidthConstraint = widthConstraint
         
         NSLayoutConstraint.activate([
-            // Gutter spans full container height
+            // Gutter spans full container height and pinned to leading edge (extends into safe area)
             gutterView.leadingAnchor.constraint(equalTo: leadingAnchor),
             gutterView.topAnchor.constraint(equalTo: topAnchor),
             gutterView.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -152,12 +159,49 @@ class CodeEditorContainerView: UIView {
             dividerView.bottomAnchor.constraint(equalTo: bottomAnchor),
             dividerView.widthAnchor.constraint(equalToConstant: 0.5),
             
-            // TextView fills remaining space
+            // TextView fills remaining space and extends to trailing edge
             textView.leadingAnchor.constraint(equalTo: dividerView.trailingAnchor),
             textView.trailingAnchor.constraint(equalTo: trailingAnchor),
             textView.topAnchor.constraint(equalTo: topAnchor),
             textView.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
+        
+        updateInsetsAndGutter()
+    }
+    
+    override func safeAreaInsetsDidChange() {
+        super.safeAreaInsetsDidChange()
+        updateInsetsAndGutter()
+    }
+    
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        updateInsetsAndGutter()
+    }
+    
+    func updateInsetsAndGutter() {
+        let lineCount = max(1, textView.text.components(separatedBy: .newlines).count)
+        let digits = String(lineCount).count
+        let baseWidth = max(40.0, CGFloat(digits * 10 + 20))
+        let totalGutterWidth = baseWidth + safeAreaInsets.left
+        
+        if gutterWidthConstraint?.constant != totalGutterWidth {
+            gutterWidthConstraint?.constant = totalGutterWidth
+        }
+        
+        let bottomInset = bottomPadding + safeAreaInsets.bottom
+        let rightInset = 8.0 + safeAreaInsets.right
+        let newInsets = UIEdgeInsets(top: 12, left: 8, bottom: bottomInset, right: rightInset)
+        if textView.textContainerInset != newInsets {
+            textView.textContainerInset = newInsets
+        }
+        
+        let scrollInsets = UIEdgeInsets(top: 0, left: 0, bottom: bottomInset, right: safeAreaInsets.right)
+        if textView.verticalScrollIndicatorInsets != scrollInsets {
+            textView.verticalScrollIndicatorInsets = scrollInsets
+        }
+        
+        gutterView.setNeedsDisplay()
     }
     
     func setText(_ text: String) {
@@ -172,16 +216,7 @@ class CodeEditorContainerView: UIView {
     }
     
     func updateLineNumbers() {
-        let lineCount = max(1, textView.text.components(separatedBy: .newlines).count)
-        let digits = String(lineCount).count
-        let calculatedWidth = max(40.0, CGFloat(digits * 10 + 20))
-        
-        if gutterWidthConstraint?.constant != calculatedWidth {
-            gutterWidthConstraint?.constant = calculatedWidth
-            setNeedsLayout()
-        }
-        
-        gutterView.setNeedsDisplay()
+        updateInsetsAndGutter()
     }
     
     func insertTextAtCursor(_ string: String) {
@@ -205,7 +240,7 @@ class LineNumberGutterView: UIView {
         let context = UIGraphicsGetCurrentContext()
         context?.clear(rect)
         
-        // Full height gutter background fill
+        // Full height gutter background fill (extends beyond safe area to edge/notch)
         UIColor.tertiarySystemBackground.setFill()
         context?.fill(rect)
         
@@ -220,11 +255,12 @@ class LineNumberGutterView: UIView {
         
         let string = textView.text as NSString
         let numberOfGlyphs = layoutManager.numberOfGlyphs
+        let minX = safeAreaInsets.left + 4
         
         if string.length == 0 {
             let lineString = "1" as NSString
             let textSize = lineString.size(withAttributes: attributes)
-            let xPosition = bounds.width - textSize.width - 8
+            let xPosition = max(minX, bounds.width - textSize.width - 8)
             let lineRect = layoutManager.extraLineFragmentRect
             let yPosition = lineRect.origin.y + topInset - contentOffset.y
             let drawRect = CGRect(
@@ -253,7 +289,7 @@ class LineNumberGutterView: UIView {
             if yPosition + lineRect.height >= 0 && yPosition <= visibleRect.height {
                 let lineString = "\(lineIndex)" as NSString
                 let textSize = lineString.size(withAttributes: attributes)
-                let xPosition = bounds.width - textSize.width - 8
+                let xPosition = max(minX, bounds.width - textSize.width - 8)
                 
                 let drawRect = CGRect(
                     x: xPosition,
@@ -277,7 +313,7 @@ class LineNumberGutterView: UIView {
             if yPosition + 20 >= 0 && yPosition <= visibleRect.height {
                 let lineString = "\(lineIndex)" as NSString
                 let textSize = lineString.size(withAttributes: attributes)
-                let xPosition = bounds.width - textSize.width - 8
+                let xPosition = max(minX, bounds.width - textSize.width - 8)
                 
                 let drawRect = CGRect(
                     x: xPosition,
