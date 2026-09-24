@@ -7,6 +7,7 @@ struct CodeEditorView: View {
     @State private var originalContent: String = ""
     @State private var isLoading: Bool = true
     @State private var isSaving: Bool = false
+    @State private var isKeyboardOpen: Bool = false
     @State private var errorMessage: String? = nil
     @State private var showSaveSuccess: Bool = false
     @State private var showDetailsSheet: Bool = false
@@ -34,6 +35,9 @@ struct CodeEditorView: View {
                 )
             } else {
                 codeEditorBody
+                    .safeAreaInset(edge: .bottom) {
+                        codeEditorToolbar
+                    }
             }
         }
         .navigationTitle(fileURL.lastPathComponent)
@@ -69,6 +73,68 @@ struct CodeEditorView: View {
             fileDetailsSheet
                 .presentationDetents([.medium])
         }
+    }
+    
+    private var codeEditorToolbar: some View {
+        HStack(spacing: 24) {
+            HStack(spacing: 16) {
+                Button(action: {
+                    // Add ;
+                }, label: {
+                    Text("(")
+                })
+                .aspectRatio(1, contentMode: .fit)
+                
+                Button(action: {
+                    // Add ;
+                }, label: {
+                    Text(")")
+                })
+                .aspectRatio(1, contentMode: .fit)
+            }
+            
+            HStack(spacing: 8) {
+                Button(action: {
+                    // Add ;
+                }, label: {
+                    Text("{")
+                })
+                .aspectRatio(1, contentMode: .fit)
+                
+                Button(action: {
+                    // Add ;
+                }, label: {
+                    Text("}")
+                })
+                .aspectRatio(1, contentMode: .fit)
+            }
+            
+            Button(action: {
+                // Add ;
+            }, label: {
+                Text(";")
+            })
+            .aspectRatio(1, contentMode: .fit)
+            
+            Spacer()
+            
+            Button(action: {
+                // Toggle keyboard
+            }, label: {
+                Label("Toggle Keyboard", systemImage: isKeyboardOpen ? "keyboard.chevron.compact.down" : "keyboard")
+                    .labelStyle(.iconOnly)
+            })
+        }
+        .font(.system(size: 24))
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            Capsule()
+                .glassEffect()
+        )
+        .padding(.bottom, 8)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
     
     private var codeEditorBody: some View {
@@ -119,6 +185,7 @@ struct CodeEditorView: View {
                     .font(.system(.body, design: .monospaced))
                     .autocorrectionDisabled(true)
                     .textInputAutocapitalization(.never)
+                    .keyboardType(.asciiCapable)
                     .padding(8)
                     .onChange(of: content) { _, _ in
                         scheduleAutosave()
