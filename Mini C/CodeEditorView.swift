@@ -12,6 +12,8 @@ struct CodeEditorView: View {
     @State private var showSaveSuccess: Bool = false
     @State private var showDetailsSheet: Bool = false
     
+    @FocusState private var isEditorFocused: Bool
+    
     private var fileItem: FileItem {
         let values = try? fileURL.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey, .fileSizeKey])
         return FileItem(
@@ -73,68 +75,123 @@ struct CodeEditorView: View {
             fileDetailsSheet
                 .presentationDetents([.medium])
         }
+        .onChange(of: isEditorFocused) { _, newValue in
+            isKeyboardOpen = newValue
+        }
     }
     
+    // MARK: - Keyboard Toolbar
+    
     private var codeEditorToolbar: some View {
-        HStack(spacing: 24) {
-            HStack(spacing: 16) {
-                Button(action: {
-                    // Add ;
-                }, label: {
-                    Text("(")
-                })
-                .aspectRatio(1, contentMode: .fit)
-                
-                Button(action: {
-                    // Add ;
-                }, label: {
-                    Text(")")
-                })
-                .aspectRatio(1, contentMode: .fit)
+        HStack(alignment: .center, spacing: 0) {
+            // Horizontally scrollable quick keys
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .center, spacing: 10) {
+                    // Grouped key pairs (C/C++ brackets, parens, braces, quotes, etc.)
+                    keyPairGroup(left: "{", right: "}")
+                    keyPairGroup(left: "(", right: ")")
+                    keyPairGroup(left: "[", right: "]")
+                    keyPairGroup(left: "<", right: ">")
+                    keyPairGroup(left: "\"", right: "\"")
+                    keyPairGroup(left: "'", right: "'")
+                    
+                    // Essential C/C++ operators and punctuation
+                    keyGroup(["\t", ";", ",", "=", "->", "::", "#"])
+                    
+                    // Arithmetic & Bitwise/Logical operators
+                    keyGroup(["+", "-", "*", "/", "%", "&", "|", "!"])
+                }
+                .padding(.horizontal, 6)
             }
+            .clipShape(Capsule())
             
-            HStack(spacing: 8) {
-                Button(action: {
-                    // Add ;
-                }, label: {
-                    Text("{")
-                })
-                .aspectRatio(1, contentMode: .fit)
-                
-                Button(action: {
-                    // Add ;
-                }, label: {
-                    Text("}")
-                })
-                .aspectRatio(1, contentMode: .fit)
+            // Vertical Divider separating scrollable keys from pinned toggle
+            Divider()
+                .frame(height: 22)
+                .padding(.horizontal, 6)
+            
+            // Pinned Keyboard Toggle Button
+            Button(action: {
+                isEditorFocused.toggle()
+            }) {
+                Image(systemName: isKeyboardOpen ? "keyboard.chevron.compact.down" : "keyboard")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(Color.primary)
+                    .frame(width: 40, height: 36, alignment: .center)
+                    .background(
+                        UnevenRoundedRectangle(
+                            topLeadingRadius: 8,
+                            bottomLeadingRadius: 8,
+                            bottomTrailingRadius: 18,
+                            topTrailingRadius: 18,
+                            style: .continuous
+                        )
+                            .fill(Color(uiColor: .tertiarySystemFill))
+                    )
             }
-            
-            Button(action: {
-                // Add ;
-            }, label: {
-                Text(";")
-            })
-            .aspectRatio(1, contentMode: .fit)
-            
-            Spacer()
-            
-            Button(action: {
-                // Toggle keyboard
-            }, label: {
-                Label("Toggle Keyboard", systemImage: isKeyboardOpen ? "keyboard.chevron.compact.down" : "keyboard")
-                    .labelStyle(.iconOnly)
-            })
+            .buttonStyle(.plain)
         }
-        .font(.system(size: 24))
-        .buttonStyle(.plain)
+        .padding(.vertical, 12)
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
         .background(
             Capsule()
                 .glassEffect()
         )
+        .padding(.horizontal, 12)
         .padding(.bottom, 8)
         .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+    
+    // MARK: - Key Helpers
+    
+    private func keyButton(_ symbol: String, isLeft: Bool = false, isRight: Bool = false) -> some View {
+        Button(action: {
+            insertText(symbol)
+        }) {
+            Text(labelForSymbol(symbol))
+                .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.primary)
+                .frame(minWidth: 36, minHeight: 36, alignment: .center)
+                .padding(.horizontal, 6)
+                .background(
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: isLeft ? 18 : isRight ? 0 : 9,
+                        bottomLeadingRadius: isLeft ? 18 : isRight ? 0 : 9,
+                        bottomTrailingRadius: isRight ? 18 : isLeft ? 0 : 9,
+                        topTrailingRadius: isRight ? 18 : isLeft ? 0 : 9,
+                        style: .continuous
+                    )
+                        .fill(Color(uiColor: .secondarySystemFill))
+                )
+        }
+        .buttonStyle(.plain)
+    }
+    
+    private func keyPairGroup(left: String, right: String) -> some View {
+        HStack(spacing: 3) {
+            keyButton(left, isLeft: true)
+            keyButton(right, isRight: true)
+        }
+    }
+    
+    private func keyGroup(_ symbols: [String]) -> some View {
+        HStack(spacing: 6) {
+            ForEach(symbols, id: \.self) { symbol in
+                keyButton(symbol)
+            }
+        }
+    }
+    
+    private func labelForSymbol(_ symbol: String) -> String {
+        switch symbol {
+        case "\t": return "⇥"
+        default: return symbol
+        }
+    }
+    
+    private func insertText(_ text: String) -> Void {
+        content.append(text)
+        isEditorFocused = true
     }
     
     private var codeEditorBody: some View {
@@ -182,6 +239,7 @@ struct CodeEditorView: View {
                 
                 // Code TextEditor
                 TextEditor(text: $content)
+                    .focused($isEditorFocused)
                     .font(.system(.body, design: .monospaced))
                     .autocorrectionDisabled(true)
                     .textInputAutocapitalization(.never)

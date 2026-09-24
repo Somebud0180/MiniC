@@ -48,18 +48,21 @@ struct ContentView: View {
                     explorerList
                         .navigationTitle("Mini C")
                         .navigationBarTitleDisplayMode(.large)
+                        .refreshable {
+                            loadItems()
+                        }
                 }
             } else {
                 explorerList
                     .navigationTitle(currentFolderURL.lastPathComponent)
                     .navigationBarTitleDisplayMode(.inline)
+                    .refreshable {
+                        loadItems()
+                    }
             }
         }
         .searchable(text: $searchText, prompt: "Search files and folders")
         .task {
-            loadItems()
-        }
-        .refreshable {
             loadItems()
         }
     }
