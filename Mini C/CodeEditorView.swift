@@ -14,6 +14,9 @@ struct CodeEditorView: View {
     
     @FocusState private var isEditorFocused: Bool
     
+    // Reference handler to insert text at cursor position in editor
+    @State private var textInserter: ((String) -> Void)? = nil
+    
     private var fileItem: FileItem {
         let values = try? fileURL.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey, .fileSizeKey])
         return FileItem(
@@ -37,6 +40,7 @@ struct CodeEditorView: View {
                 )
             } else {
                 codeEditorBody
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .safeAreaInset(edge: .bottom) {
                         codeEditorToolbar
                     }
@@ -126,7 +130,7 @@ struct CodeEditorView: View {
                             topTrailingRadius: 18,
                             style: .continuous
                         )
-                            .fill(Color(uiColor: .tertiarySystemFill))
+                        .fill(Color(uiColor: .tertiarySystemFill))
                     )
             }
             .buttonStyle(.plain)
@@ -161,7 +165,7 @@ struct CodeEditorView: View {
                         topTrailingRadius: isRight ? 18 : isLeft ? 0 : 9,
                         style: .continuous
                     )
-                        .fill(Color(uiColor: .secondarySystemFill))
+                    .fill(Color(uiColor: .secondarySystemFill))
                 )
         }
         .buttonStyle(.plain)
@@ -189,8 +193,12 @@ struct CodeEditorView: View {
         }
     }
     
-    private func insertText(_ text: String) -> Void {
-        content.append(text)
+    private func insertText(_ textToInsert: String) {
+        if let inserter = textInserter {
+            inserter(textToInsert)
+        } else {
+            content.append(textToInsert)
+        }
         isEditorFocused = true
     }
     
@@ -220,35 +228,16 @@ struct CodeEditorView: View {
             
             Divider()
             
-            // Code editor area with line numbers
-            HStack(alignment: .top, spacing: 0) {
-                // Line numbers
-                VStack(alignment: .trailing, spacing: 4) {
-                    ForEach(1...max(1, lineCount), id: \.self) { lineNum in
-                        Text("\(lineNum)")
-                            .font(.system(.footnote, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                    }
+            // Full-height Code Editor with synced line numbers gutter
+            CodeEditorTextView(
+                text: $content,
+                isFocused: $isEditorFocused,
+                textInserter: $textInserter,
+                onTextChange: {
+                    scheduleAutosave()
                 }
-                .padding(.leading, 8)
-                .padding(.trailing, 8)
-                .padding(.top, 12)
-                .background(Color(uiColor: .tertiarySystemBackground))
-                
-                Divider()
-                
-                // Code TextEditor
-                TextEditor(text: $content)
-                    .focused($isEditorFocused)
-                    .font(.system(.body, design: .monospaced))
-                    .autocorrectionDisabled(true)
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.asciiCapable)
-                    .padding(8)
-                    .onChange(of: content) { _, _ in
-                        scheduleAutosave()
-                    }
-            }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
     
@@ -329,3 +318,6 @@ struct CodeEditorView: View {
         // Simple autosave helper
     }
 }
+
+// MARK: - CodeEditorTextView (UIKit Integration)
+
