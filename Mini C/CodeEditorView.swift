@@ -7,12 +7,10 @@ struct CodeEditorView: View {
     @State private var originalContent: String = ""
     @State private var isLoading: Bool = true
     @State private var isSaving: Bool = false
-    @State private var isKeyboardOpen: Bool = false
+    @State private var isEditorFocused: Bool = false
     @State private var errorMessage: String? = nil
     @State private var showSaveSuccess: Bool = false
     @State private var showDetailsSheet: Bool = false
-    
-    @FocusState private var isEditorFocused: Bool
     
     // Reference handler to insert text at cursor position in editor
     @State private var textInserter: ((String) -> Void)? = nil
@@ -80,9 +78,6 @@ struct CodeEditorView: View {
             fileDetailsSheet
                 .presentationDetents([.medium])
         }
-        .onChange(of: isEditorFocused) { _, newValue in
-            isKeyboardOpen = newValue
-        }
     }
     
     // MARK: - Keyboard Toolbar
@@ -119,7 +114,7 @@ struct CodeEditorView: View {
             Button(action: {
                 isEditorFocused.toggle()
             }) {
-                Image(systemName: isKeyboardOpen ? "keyboard.chevron.compact.down" : "keyboard")
+                Image(systemName: isEditorFocused ? "keyboard.chevron.compact.down" : "keyboard")
                     .font(.system(size: 18, weight: .medium))
                     .foregroundStyle(Color.primary)
                     .frame(width: 40, height: 36, alignment: .center)

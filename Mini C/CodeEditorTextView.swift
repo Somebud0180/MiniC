@@ -3,7 +3,7 @@ import SwiftUI
 
 struct CodeEditorTextView: UIViewRepresentable {
     @Binding var text: String
-    @FocusState.Binding var isFocused: Bool
+    @Binding var isFocused: Bool
     @Binding var textInserter: ((String) -> Void)?
     var bottomPadding: CGFloat = 80
     var onTextChange: (() -> Void)?
@@ -17,10 +17,12 @@ struct CodeEditorTextView: UIViewRepresentable {
         container.bottomPadding = bottomPadding
         container.textView.delegate = context.coordinator
         
-        container.onTextChanged = { newText in
-            if self.text != newText {
-                self.text = newText
-                self.onTextChange?()
+        let coordinator = context.coordinator
+        container.onTextChanged = { [weak coordinator] newText in
+            guard let coordinator = coordinator else { return }
+            if coordinator.parent.text != newText {
+                coordinator.parent.text = newText
+                coordinator.parent.onTextChange?()
             }
         }
         
@@ -35,6 +37,8 @@ struct CodeEditorTextView: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: CodeEditorContainerView, context: Context) {
+        context.coordinator.parent = self
+        
         if uiView.bottomPadding != bottomPadding {
             uiView.bottomPadding = bottomPadding
             uiView.updateInsetsAndGutter()
