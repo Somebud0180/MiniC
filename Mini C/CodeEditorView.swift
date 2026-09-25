@@ -39,7 +39,7 @@ struct CodeEditorView: View {
             } else {
                 codeEditorBody
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .ignoresSafeArea(edges: [.horizontal])
+                    .ignoresSafeArea(.container, edges: [.horizontal, .bottom])
                     .overlay(alignment: .bottom) {
                         codeEditorToolbar
                     }
@@ -138,8 +138,7 @@ struct CodeEditorView: View {
                 .glassEffect()
         )
         .padding(.horizontal, 12)
-        .safeAreaPadding(.horizontal)
-        .padding(.bottom, 8)
+        .safeAreaPadding(.bottom)
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
     

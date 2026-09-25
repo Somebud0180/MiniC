@@ -71,12 +71,24 @@ struct CodeEditorTextView: UIViewRepresentable {
             parent.onTextChange?()
             if let container = textView.superview as? CodeEditorContainerView {
                 container.updateLineNumbers()
+                container.scrollToCursor()
+            }
+        }
+        
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            if let container = textView.superview as? CodeEditorContainerView {
+                container.scrollToCursor()
             }
         }
         
         func textViewDidBeginEditing(_ textView: UITextView) {
             DispatchQueue.main.async {
                 self.parent.isFocused = true
+            }
+            if let container = textView.superview as? CodeEditorContainerView {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    container.scrollToCursor()
+                }
             }
         }
         
@@ -102,6 +114,8 @@ class CodeEditorContainerView: UIView {
     let textView = UITextView()
     private let dividerView = UIView()
     private var gutterWidthConstraint: NSLayoutConstraint?
+    private var lastKeyboardFrame: CGRect?
+    private var keyboardOverlap: CGFloat = 0
     
     var bottomPadding: CGFloat = 80
     var onTextChanged: ((String) -> Void)?
@@ -114,6 +128,10 @@ class CodeEditorContainerView: UIView {
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         setupViews()
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
     
     private func setupViews() {
@@ -142,6 +160,8 @@ class CodeEditorContainerView: UIView {
         textView.alwaysBounceVertical = true
         textView.isScrollEnabled = true
         textView.showsVerticalScrollIndicator = true
+        textView.contentInsetAdjustmentBehavior = .never
+        textView.keyboardDismissMode = .interactive
         textView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(textView)
         
@@ -170,7 +190,28 @@ class CodeEditorContainerView: UIView {
             textView.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
         
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(keyboardDidChangeFrame(_:)),
+            name: UIResponder.keyboardWillChangeFrameNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(keyboardWillHide(_:)),
+            name: UIResponder.keyboardWillHideNotification,
+            object: nil
+        )
+        
         updateInsetsAndGutter()
+    }
+    
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            recomputeKeyboardOverlap()
+            updateInsetsAndGutter()
+        }
     }
     
     override func safeAreaInsetsDidChange() {
@@ -180,7 +221,52 @@ class CodeEditorContainerView: UIView {
     
     override func layoutSubviews() {
         super.layoutSubviews()
+        recomputeKeyboardOverlap()
         updateInsetsAndGutter()
+    }
+    
+    private func recomputeKeyboardOverlap() {
+        guard let keyboardFrame = lastKeyboardFrame, window != nil else {
+            keyboardOverlap = 0
+            return
+        }
+        let keyboardFrameInView = convert(keyboardFrame, from: nil)
+        let overlap = max(0, bounds.maxY - keyboardFrameInView.minY)
+        self.keyboardOverlap = overlap
+    }
+    
+    @objc private func keyboardDidChangeFrame(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let keyboardEndFrame = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else {
+            return
+        }
+        self.lastKeyboardFrame = keyboardEndFrame
+        recomputeKeyboardOverlap()
+        
+        let duration = (userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+        let curveRaw = (userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int) ?? (7 << 16)
+        let options = UIView.AnimationOptions(rawValue: UInt(curveRaw))
+        
+        UIView.animate(withDuration: duration, delay: 0, options: [options, .beginFromCurrentState]) {
+            self.updateInsetsAndGutter()
+        } completion: { _ in
+            if self.textView.isFirstResponder {
+                self.scrollToCursor()
+            }
+        }
+    }
+    
+    @objc private func keyboardWillHide(_ notification: Notification) {
+        self.lastKeyboardFrame = nil
+        self.keyboardOverlap = 0
+        
+        let duration = (notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+        let curveRaw = (notification.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int) ?? (7 << 16)
+        let options = UIView.AnimationOptions(rawValue: UInt(curveRaw))
+        
+        UIView.animate(withDuration: duration, delay: 0, options: [options, .beginFromCurrentState]) {
+            self.updateInsetsAndGutter()
+        }
     }
     
     func updateInsetsAndGutter() {
@@ -193,19 +279,44 @@ class CodeEditorContainerView: UIView {
             gutterWidthConstraint?.constant = totalGutterWidth
         }
         
-        let bottomInset = bottomPadding + safeAreaInsets.bottom
+        let effectiveBottomInset = bottomPadding + max(safeAreaInsets.bottom, keyboardOverlap)
         let rightInset = 8.0 + safeAreaInsets.right
-        let newInsets = UIEdgeInsets(top: 12, left: 8, bottom: bottomInset, right: rightInset)
+        let newInsets = UIEdgeInsets(top: 12, left: 8, bottom: effectiveBottomInset, right: rightInset)
         if textView.textContainerInset != newInsets {
             textView.textContainerInset = newInsets
         }
         
-        let scrollInsets = UIEdgeInsets(top: 0, left: 0, bottom: bottomInset, right: safeAreaInsets.right)
+        let scrollInsets = UIEdgeInsets(top: 0, left: 0, bottom: effectiveBottomInset, right: safeAreaInsets.right)
         if textView.verticalScrollIndicatorInsets != scrollInsets {
             textView.verticalScrollIndicatorInsets = scrollInsets
         }
         
         gutterView.setNeedsDisplay()
+    }
+    
+    func scrollToCursor() {
+        guard textView.isFirstResponder,
+              let selectedRange = textView.selectedTextRange else { return }
+        let caretRect = textView.caretRect(for: selectedRange.end)
+        guard !caretRect.isNull && !caretRect.isInfinite else { return }
+        
+        let bottomClearance = bottomPadding + max(safeAreaInsets.bottom, keyboardOverlap)
+        let visibleHeight = bounds.height - bottomClearance
+        guard visibleHeight > 0 else { return }
+        
+        let caretY = caretRect.origin.y
+        let currentOffsetY = textView.contentOffset.y
+        let relativeCaretY = caretY - currentOffsetY
+        
+        if relativeCaretY > visibleHeight - caretRect.height - 16 {
+            let targetOffsetY = caretY - (visibleHeight - caretRect.height - 16)
+            let maxOffsetY = max(0, textView.contentSize.height - bounds.height + bottomClearance)
+            let clampedOffsetY = min(targetOffsetY, maxOffsetY)
+            textView.setContentOffset(CGPoint(x: textView.contentOffset.x, y: clampedOffsetY), animated: true)
+        } else if relativeCaretY < 8 {
+            let targetOffsetY = max(0, caretY - 8)
+            textView.setContentOffset(CGPoint(x: textView.contentOffset.x, y: targetOffsetY), animated: true)
+        }
     }
     
     func setText(_ text: String) {
@@ -227,6 +338,7 @@ class CodeEditorContainerView: UIView {
         textView.insertText(string)
         onTextChanged?(textView.text)
         updateLineNumbers()
+        scrollToCursor()
     }
 }
 
