@@ -65,6 +65,7 @@ struct FolderExplorerView: View {
     // Error state
     @State private var alertErrorMessage: String? = nil
     @State private var showAlertError: Bool = false
+    @State private var showSettingsSheet: Bool = false
     
     var isRootDirectory: Bool {
         folderURL.path == FileManagerService.shared.documentsDirectory.path
@@ -156,6 +157,12 @@ struct FolderExplorerView: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
+                Button(action: {
+                    showSettingsSheet = true
+                }) {
+                    Image(systemName: "gearshape")
+                }
+                
                 Menu {
                     Button(action: {
                         newFileName = ""
@@ -172,10 +179,12 @@ struct FolderExplorerView: View {
                         Label("New Folder", systemImage: "folder.badge.plus")
                     }
                 } label: {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title3)
+                    Image(systemName: "plus")
                 }
             }
+        }
+        .sheet(isPresented: $showSettingsSheet) {
+            SettingsView()
         }
         .sheet(isPresented: $showCreateFileDialog) {
             createFileSheet

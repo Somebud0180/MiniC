@@ -77,6 +77,27 @@ struct CodeEditorTextView: UIViewRepresentable {
             }
         }
         
+        func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+            let result = SmartCodeStructurer.handleKeystroke(textView: textView, range: range, replacementText: text)
+            switch result {
+            case .unhandled:
+                return true
+            case .handled(let targetRange, let replacement, let cursorLocation):
+                if let textRange = textView.textRange(from: targetRange) {
+                    textView.replace(textRange, withText: replacement)
+                } else {
+                    let nsString = (textView.text ?? "") as NSString
+                    textView.text = nsString.replacingCharacters(in: targetRange, with: replacement)
+                }
+                textView.selectedRange = NSRange(location: cursorLocation, length: 0)
+                textViewDidChange(textView)
+                return false
+            case .moveCursor(let newLocation):
+                textView.selectedRange = NSRange(location: newLocation, length: 0)
+                return false
+            }
+        }
+        
         func textViewDidChangeSelection(_ textView: UITextView) {
             if let container = textView.superview as? CodeEditorContainerView {
                 container.scrollToCursor()
@@ -106,6 +127,18 @@ struct CodeEditorTextView: UIViewRepresentable {
                 container.gutterView.setNeedsDisplay()
             }
         }
+    }
+}
+
+// MARK: - UITextView Range Extension
+
+extension UITextView {
+    func textRange(from nsRange: NSRange) -> UITextRange? {
+        guard let start = position(from: beginningOfDocument, offset: nsRange.location),
+              let end = position(from: start, offset: nsRange.length) else {
+            return nil
+        }
+        return textRange(from: start, to: end)
     }
 }
 
@@ -411,7 +444,22 @@ class CodeEditorContainerView: UIView {
     }
     
     func insertTextAtCursor(_ string: String) {
-        textView.insertText(string)
+        let selectedRange = textView.selectedRange
+        let result = SmartCodeStructurer.handleKeystroke(textView: textView, range: selectedRange, replacementText: string)
+        switch result {
+        case .unhandled:
+            textView.insertText(string)
+        case .handled(let targetRange, let replacement, let cursorLocation):
+            if let textRange = textView.textRange(from: targetRange) {
+                textView.replace(textRange, withText: replacement)
+            } else {
+                let nsString = (textView.text ?? "") as NSString
+                textView.text = nsString.replacingCharacters(in: targetRange, with: replacement)
+            }
+            textView.selectedRange = NSRange(location: cursorLocation, length: 0)
+        case .moveCursor(let newLocation):
+            textView.selectedRange = NSRange(location: newLocation, length: 0)
+        }
         onTextChanged?(textView.text)
         updateLineNumbers()
         scrollToCursor()

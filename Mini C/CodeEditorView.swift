@@ -10,8 +10,10 @@ struct CodeEditorView: View {
     @State private var isEditorFocused: Bool = false
     @State private var errorMessage: String? = nil
     @State private var showSaveSuccess: Bool = false
+    @State private var showPrettifyFeedback: Bool = false
     @State private var showDetailsSheet: Bool = false
     @State private var isHeaderCollapsed: Bool = false
+    @State private var autosaveTask: Task<Void, Never>? = nil
     
     // Reference handler to insert text at cursor position in editor
     @State private var textInserter: ((String) -> Void)? = nil
@@ -44,34 +46,28 @@ struct CodeEditorView: View {
                     .overlay(alignment: .bottom) {
                         codeEditorToolbar
                     }
+                    .overlay(alignment: .top) {
+                        if showPrettifyFeedback {
+                            HStack(spacing: 6) {
+                                Image(systemName: "sparkles")
+                                    .foregroundStyle(.purple)
+                                Text("Code Prettified")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .shadow(color: .black.opacity(0.12), radius: 6, y: 3)
+                            .padding(.top, 12)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+                    }
             }
         }
         .navigationTitle(fileURL.lastPathComponent)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                if isSaving {
-                    ProgressView()
-                        .controlSize(.small)
-                } else if showSaveSuccess {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                }
-                
-                Button(action: saveChanges) {
-                    Label("Save", systemImage: "square.and.arrow.down")
-                }
-                .disabled(content == originalContent || isSaving)
-                
-                ShareLink(item: fileURL) {
-                    Image(systemName: "square.and.arrow.up")
-                }
-                
-                Button(action: { showDetailsSheet = true }) {
-                    Image(systemName: "info.circle")
-                }
-            }
-        }
+        .toolbar { topToolbar }
         .toolbar(isHeaderCollapsed ? .hidden : .visible, for: .navigationBar)
         .task {
             loadFileContent()
@@ -85,10 +81,87 @@ struct CodeEditorView: View {
                 isHeaderCollapsed = isEditorFocused
             }
         }
+        .onDisappear {
+            autosaveTask?.cancel()
+            if content != originalContent && !isSaving {
+                saveChanges()
+            }
+        }
+    }
+    
+    // MARK: - Navigation Toolbar
+    private var topToolbar: some ToolbarContent {
+        Group {
+            if #available(anyAppleOS 27.0, *) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button(action: prettifyContent) {
+                        Label("Prettify", systemImage: "wand.and.sparkles")
+                            .labelStyle(.iconOnly)
+                    }
+                    .disabled(isLoading || isSaving)
+                    
+                    Button(action: saveChanges) {
+                        if isSaving {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Label("Save", systemImage: "square.and.arrow.down")
+                                .labelStyle(.iconOnly)
+                        }
+                    }
+                    .disabled(content == originalContent || isSaving)
+                    
+                }
+                
+                ToolbarOverflowMenu {
+                    ShareLink(item: fileURL) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                            .labelStyle(.iconOnly)
+                    }
+                    
+                    Button(action: { showDetailsSheet = true }) {
+                        Label("File Info", systemImage: "info.circle")
+                            .labelStyle(.iconOnly)
+                    }
+                }
+            } else {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button(action: prettifyContent) {
+                        Label("Prettify", systemImage: "wand.and.sparkles")
+                            .labelStyle(.iconOnly)
+                    }
+                    .disabled(isLoading || isSaving)
+                    
+                    Button(action: saveChanges) {
+                        if isSaving {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Label("Save", systemImage: "square.and.arrow.down")
+                                .labelStyle(.iconOnly)
+                        }
+                    }
+                    .disabled(content == originalContent || isSaving)
+                    
+                    Menu {
+                        ShareLink(item: fileURL) {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                                .labelStyle(.iconOnly)
+                        }
+                        
+                        Button(action: { showDetailsSheet = true }) {
+                            Label("File Info", systemImage: "info.circle")
+                                .labelStyle(.iconOnly)
+                        }
+                    } label: {
+                        Label("More", systemImage: "elipsis")
+                    }
+                }
+            }
+        }
     }
     
     // MARK: - Keyboard Toolbar
-    
     private var codeEditorToolbar: some View {
         HStack(alignment: .center, spacing: 0) {
             // Horizontally scrollable quick keys
@@ -302,6 +375,12 @@ struct CodeEditorView: View {
     }
     
     private func saveChanges() {
+        if EditorSettings.shared.formatOnSave {
+            let formatted = CodeFormatter.prettify(content, settings: .shared)
+            if formatted != content {
+                content = formatted
+            }
+        }
         isSaving = true
         do {
             try FileManagerService.shared.saveFileContent(content, to: fileURL)
@@ -321,7 +400,40 @@ struct CodeEditorView: View {
         }
     }
     
+    private func prettifyContent() {
+        let formatted = CodeFormatter.prettify(content, settings: .shared)
+        if formatted != content {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                content = formatted
+            }
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                showPrettifyFeedback = true
+            }
+            let generator = UINotificationFeedbackGenerator()
+            generator.notificationOccurred(.success)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    showPrettifyFeedback = false
+                }
+            }
+            scheduleAutosave()
+        } else {
+            let generator = UIImpactFeedbackGenerator(style: .light)
+            generator.impactOccurred()
+        }
+    }
+    
     private func scheduleAutosave() {
-        // Simple autosave helper
+        guard EditorSettings.shared.autoSave else { return }
+        autosaveTask?.cancel()
+        autosaveTask = Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                if content != originalContent && !isSaving {
+                    saveChanges()
+                }
+            }
+        }
     }
 }
