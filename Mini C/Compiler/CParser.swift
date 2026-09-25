@@ -221,15 +221,26 @@ public final class CParser {
     
     // MARK: - Types
     
-    private func isTypeBeginning() -> Bool {
-        let t = peek().type
+    private func isTypeBeginning(at index: Int? = nil) -> Bool {
+        let i = index ?? current
+        guard i < tokens.count else { return false }
+        let t = tokens[i].type
         switch t {
         case .kwInt, .kwFloat, .kwDouble, .kwChar, .kwVoid, .kwBool,
              .kwLong, .kwShort, .kwUnsigned, .kwSigned, .kwConst,
              .kwStruct, .kwClass, .kwAuto:
             return true
         case .identifier(let name):
-            if name == "string" || name == "vector" || name == "std" { return true }
+            if name == "string" || name == "vector" { return true }
+            if name == "std" {
+                if i + 2 < tokens.count && tokens[i + 1].type == .colonColon {
+                    if case .identifier(let sub) = tokens[i + 2].type {
+                        if sub == "string" || sub == "vector" { return true }
+                        if typedefs.contains(sub) || structNames.contains(sub) { return true }
+                    }
+                }
+                return false
+            }
             if typedefs.contains(name) || structNames.contains(name) { return true }
             return false
         default:
@@ -276,6 +287,8 @@ public final class CParser {
                     baseType = .stringType
                 } else if stdSub == "vector" {
                     baseType = try parseVectorType()
+                } else if ["cout", "cin", "endl", "cerr"].contains(stdSub) {
+                    throw CCompilerError("'std::\(stdSub)' is not a type", location: token.location)
                 } else {
                     baseType = .custom("std::\(stdSub)")
                 }
@@ -927,8 +940,7 @@ public final class CParser {
         if check(.leftParen) {
             let nextIndex = current + 1
             if nextIndex < tokens.count {
-                let nextToken = tokens[nextIndex]
-                let isType = isTokenStartOfType(nextToken.type)
+                let isType = isTypeBeginning(at: nextIndex)
                 if isType {
                     advance() // (
                     let castType = try parseType()
@@ -940,19 +952,6 @@ public final class CParser {
         }
         
         return try parsePostfix()
-    }
-    
-    private func isTokenStartOfType(_ type: CTokenType) -> Bool {
-        switch type {
-        case .kwInt, .kwFloat, .kwDouble, .kwChar, .kwVoid, .kwBool,
-             .kwLong, .kwShort, .kwUnsigned, .kwSigned, .kwConst,
-             .kwStruct, .kwClass:
-            return true
-        case .identifier(let name):
-            return typedefs.contains(name) || structNames.contains(name) || name == "string"
-        default:
-            return false
-        }
     }
     
     private func parsePostfix() throws -> CExpr {
