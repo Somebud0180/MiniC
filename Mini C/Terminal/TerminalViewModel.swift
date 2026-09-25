@@ -98,17 +98,20 @@ public final class TerminalViewModel: ObservableObject {
             source: code,
             fileName: fileName,
             onStdout: { [weak self] text in
-                Task { @MainActor in
+                guard let self else { return }
+                Task { @MainActor [weak self] in
                     self?.appendEntry(text, style: .stdout)
                 }
             },
             onStderr: { [weak self] text in
-                Task { @MainActor in
+                guard let self else { return }
+                Task { @MainActor [weak self] in
                     self?.appendEntry(text, style: .stderr)
                 }
             },
             onWaitingForInput: { [weak self] isWaiting in
-                Task { @MainActor in
+                guard let self else { return }
+                Task { @MainActor [weak self] in
                     if isWaiting {
                         self?.status = .waitingForInput
                     } else if self?.status == .waitingForInput {

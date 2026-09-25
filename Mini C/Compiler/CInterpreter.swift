@@ -94,20 +94,22 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
     public func readStdin() async throws -> String {
         try Task.checkCancellation()
         
-        lock.lock()
-        if !stdinBuffer.isEmpty {
-            let next = stdinBuffer.removeFirst()
-            lock.unlock()
+        let next: String? = lock.withLock {
+            if !stdinBuffer.isEmpty {
+                return stdinBuffer.removeFirst()
+            }
+            return nil
+        }
+        if let next {
             return next
         }
-        lock.unlock()
         
         onWaitingForInput?(true)
         
         return try await withCheckedThrowingContinuation { continuation in
-            lock.lock()
-            self.inputContinuation = continuation
-            lock.unlock()
+            lock.withLock {
+                self.inputContinuation = continuation
+            }
         }
     }
     
@@ -368,7 +370,7 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         case .structDecl(let name, let fields, _):
             structs[name] = fields
             
-        case .funcDecl(let returnType, let name, let params, let body, _):
+        case .funcDecl(_, let name, let params, let body, _):
             functions[name] = (params: params, body: body)
             
         case .usingNamespace:

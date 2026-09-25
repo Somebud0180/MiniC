@@ -85,7 +85,7 @@ public final class CParser {
             // Check for struct declaration
             if check(.kwStruct) || check(.kwClass) {
                 let startLoc = peek().location
-                let isClass = (advance().type == .kwClass)
+                _ = (advance().type == .kwClass)
                 if case .identifier(let name) = peek().type {
                     advance()
                     if check(.leftBrace) {
@@ -174,7 +174,7 @@ public final class CParser {
                 continue
             }
             
-            let isConst = match(.kwConst)
+            _ = match(.kwConst)
             let fieldType = try parseType()
             
             while true {
@@ -366,7 +366,7 @@ public final class CParser {
                     break
                 }
                 
-                let isConst = match(.kwConst)
+                _ = match(.kwConst)
                 var pType = try parseType()
                 var isRef = false
                 if case .reference = pType {
