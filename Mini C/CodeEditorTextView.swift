@@ -33,6 +33,7 @@ struct CodeEditorTextView: UIViewRepresentable {
         }
         
         container.setText(text)
+        container.updateInsetsAndGutter()
         return container
     }
     
@@ -41,8 +42,9 @@ struct CodeEditorTextView: UIViewRepresentable {
         
         if uiView.bottomPadding != bottomPadding {
             uiView.bottomPadding = bottomPadding
-            uiView.updateInsetsAndGutter()
         }
+        
+        uiView.updateInsetsAndGutter()
         
         if uiView.textView.text != text {
             uiView.setText(text)
@@ -107,15 +109,30 @@ struct CodeEditorTextView: UIViewRepresentable {
     }
 }
 
+// MARK: - Display Link Proxy
+
+private class DisplayLinkProxy {
+    weak var target: CodeEditorContainerView?
+    
+    init(_ target: CodeEditorContainerView) {
+        self.target = target
+    }
+}
+
 // MARK: - CodeEditorContainerView
 
 class CodeEditorContainerView: UIView {
     let gutterView = LineNumberGutterView()
-    let textView = UITextView()
+    // Explicitly initialize with TextKit 1 to ensure complete compatibility with LineNumberGutterView's layoutManager and reliable insets
+    let textView = UITextView(usingTextLayoutManager: false)
     private let dividerView = UIView()
     private var gutterWidthConstraint: NSLayoutConstraint?
-    private var lastKeyboardFrame: CGRect?
+    
+    private var lastKeyboardScreenFrame: CGRect?
     private var keyboardOverlap: CGFloat = 0
+    private var isKeyboardVisible: Bool = false
+    private var displayLink: CADisplayLink?
+    private var lastWindowScreenOrigin: CGPoint?
     
     var bottomPadding: CGFloat = 80
     var onTextChanged: ((String) -> Void)?
@@ -211,28 +228,57 @@ class CodeEditorContainerView: UIView {
         if window != nil {
             recomputeKeyboardOverlap()
             updateInsetsAndGutter()
+            setNeedsLayout()
         }
     }
     
     override func safeAreaInsetsDidChange() {
         super.safeAreaInsetsDidChange()
         updateInsetsAndGutter()
+        setNeedsLayout()
     }
     
     override func layoutSubviews() {
-        super.layoutSubviews()
+        // Recompute insets and constraint constants before super.layoutSubviews so Auto Layout applies them immediately
         recomputeKeyboardOverlap()
         updateInsetsAndGutter()
+        super.layoutSubviews()
     }
     
+    // MARK: - Keyboard Handling
+    
     private func recomputeKeyboardOverlap() {
-        guard let keyboardFrame = lastKeyboardFrame, window != nil else {
+        guard let window = self.window, bounds.height > 0 else {
             keyboardOverlap = 0
             return
         }
-        let keyboardFrameInView = convert(keyboardFrame, from: nil)
-        let overlap = max(0, bounds.maxY - keyboardFrameInView.minY)
-        self.keyboardOverlap = overlap
+        
+        var calculatedOverlap: CGFloat = 0
+        
+        if isKeyboardVisible, let screenFrame = lastKeyboardScreenFrame {
+            // Accurately convert the keyboard's screen frame to the view's local coordinate space
+            let screenSpace: UICoordinateSpace = window.windowScene?.effectiveGeometry.coordinateSpace ?? window.screen.coordinateSpace
+            let frameInWindow = window.coordinateSpace.convert(screenFrame, from: screenSpace)
+            let frameInView = convert(frameInWindow, from: window)
+            
+            let intersection = bounds.intersection(frameInView)
+            if !intersection.isNull && intersection.height > 0 && frameInView.maxY >= bounds.maxY - 10 {
+                calculatedOverlap = max(0, bounds.maxY - frameInView.minY)
+            }
+        }
+        
+        // Also check UIKit's keyboardLayoutGuide if available to ensure docked/shortcuts bar tracking
+        if isKeyboardVisible {
+            let guideFrame = keyboardLayoutGuide.layoutFrame
+            if guideFrame.height > 0 && guideFrame.minY < bounds.maxY {
+                let guideOverlap = max(0, bounds.maxY - guideFrame.minY)
+                if guideOverlap > calculatedOverlap {
+                    calculatedOverlap = guideOverlap
+                }
+            }
+        }
+        
+        self.keyboardOverlap = calculatedOverlap
     }
     
     @objc private func keyboardDidChangeFrame(_ notification: Notification) {
@@ -240,8 +286,26 @@ class CodeEditorContainerView: UIView {
               let keyboardEndFrame = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else {
             return
         }
-        self.lastKeyboardFrame = keyboardEndFrame
-        recomputeKeyboardOverlap()
+        
+        guard let window = self.window else {
+            self.lastKeyboardScreenFrame = keyboardEndFrame
+            return
+        }
+        
+        let screenSpace: UICoordinateSpace = window.windowScene?.effectiveGeometry.coordinateSpace ?? window.screen.coordinateSpace
+        let frameInWindow = window.coordinateSpace.convert(keyboardEndFrame, from: screenSpace)
+        let frameInView = convert(frameInWindow, from: window)
+        
+        if frameInView.minY >= bounds.maxY || keyboardEndFrame.height <= 0 {
+            // Keyboard is off-screen / hidden
+            self.isKeyboardVisible = false
+            self.lastKeyboardScreenFrame = nil
+            self.keyboardOverlap = 0
+        } else {
+            self.lastKeyboardScreenFrame = keyboardEndFrame
+            self.isKeyboardVisible = true
+            recomputeKeyboardOverlap()
+        }
         
         let duration = (userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
         let curveRaw = (userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int) ?? (7 << 16)
@@ -249,6 +313,7 @@ class CodeEditorContainerView: UIView {
         
         UIView.animate(withDuration: duration, delay: 0, options: [options, .beginFromCurrentState]) {
             self.updateInsetsAndGutter()
+            self.layoutIfNeeded()
         } completion: { _ in
             if self.textView.isFirstResponder {
                 self.scrollToCursor()
@@ -257,7 +322,8 @@ class CodeEditorContainerView: UIView {
     }
     
     @objc private func keyboardWillHide(_ notification: Notification) {
-        self.lastKeyboardFrame = nil
+        self.isKeyboardVisible = false
+        self.lastKeyboardScreenFrame = nil
         self.keyboardOverlap = 0
         
         let duration = (notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
@@ -266,8 +332,11 @@ class CodeEditorContainerView: UIView {
         
         UIView.animate(withDuration: duration, delay: 0, options: [options, .beginFromCurrentState]) {
             self.updateInsetsAndGutter()
+            self.layoutIfNeeded()
         }
     }
+    
+    // MARK: - Insets & Layout
     
     func updateInsetsAndGutter() {
         let lineCount = max(1, textView.text.components(separatedBy: .newlines).count)
@@ -281,14 +350,21 @@ class CodeEditorContainerView: UIView {
         
         let effectiveBottomInset = bottomPadding + max(safeAreaInsets.bottom, keyboardOverlap)
         let rightInset = 8.0 + safeAreaInsets.right
-        let newInsets = UIEdgeInsets(top: 12, left: 8, bottom: effectiveBottomInset, right: rightInset)
-        if textView.textContainerInset != newInsets {
-            textView.textContainerInset = newInsets
+        
+        // Use contentInset on the scroll view for toolbar and keyboard clearance so scrolling can extend past the bottom
+        let scrollInsets = UIEdgeInsets(top: 0, left: 0, bottom: effectiveBottomInset, right: 0)
+        if textView.contentInset != scrollInsets {
+            textView.contentInset = scrollInsets
         }
         
-        let scrollInsets = UIEdgeInsets(top: 0, left: 0, bottom: effectiveBottomInset, right: 0)
         if textView.verticalScrollIndicatorInsets != scrollInsets {
             textView.verticalScrollIndicatorInsets = scrollInsets
+        }
+        
+        // Text container insets handle document internal margins
+        let textInsets = UIEdgeInsets(top: 12, left: 8, bottom: 12, right: rightInset)
+        if textView.textContainerInset != textInsets {
+            textView.textContainerInset = textInsets
         }
         
         gutterView.setNeedsDisplay()
