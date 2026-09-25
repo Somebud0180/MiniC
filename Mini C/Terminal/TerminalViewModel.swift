@@ -84,12 +84,20 @@ public final class TerminalViewModel: ObservableObject {
         }
     }
     
-    public func run(code: String, fileName: String) {
-        // If already running, cancel previous
-        stop()
+    public func load(code: String, fileName: String) {
+        if lastRunSource != code && currentFileName != fileName {
+            clear()
+        }
         
         lastRunSource = code
         currentFileName = fileName
+    }
+    
+    public func loadAndRun(code: String, fileName: String) {
+        // If already running, cancel previous
+        stop()
+        
+        load(code: code, fileName: fileName)
         status = .compiling
         
         appendEntry("=== Building \(fileName) ===", style: .system)
@@ -144,7 +152,7 @@ public final class TerminalViewModel: ObservableObject {
     
     public func rerun() {
         guard let code = lastRunSource else { return }
-        run(code: code, fileName: currentFileName)
+        loadAndRun(code: code, fileName: currentFileName)
     }
     
     public func sendInput() {

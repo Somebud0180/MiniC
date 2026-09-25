@@ -4,7 +4,7 @@ struct CodeEditorView: View {
     let fileURL: URL
     @ObservedObject var terminalViewModel: TerminalViewModel = TerminalViewModel()
     var onRun: ((String, String) -> Void)? = nil
-    var onToggleTerminal: (() -> Void)? = nil
+    var onToggleTerminal: ((String, String) -> Void)? = nil
     
     @State private var content: String = ""
     @State private var originalContent: String = ""
@@ -120,7 +120,7 @@ struct CodeEditorView: View {
                     
                     // Terminal Toggle
                     Button(action: {
-                        onToggleTerminal?()
+                        onToggleTerminal?(content, fileURL.lastPathComponent)
                     }) {
                         Label("Terminal", systemImage: "terminal")
                     }
@@ -180,7 +180,7 @@ struct CodeEditorView: View {
                     
                     // Terminal Toggle
                     Button(action: {
-                        onToggleTerminal?()
+                        onToggleTerminal?(content, fileURL.lastPathComponent)
                     }) {
                         Label("Terminal", systemImage: "terminal")
                     }

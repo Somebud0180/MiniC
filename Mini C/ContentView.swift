@@ -31,13 +31,14 @@ struct ContentView: View {
                         fileURL: selectedFileURL,
                         terminalViewModel: terminalViewModel,
                         onRun: { code, fileName in
-                            terminalViewModel.run(code: code, fileName: fileName)
+                            terminalViewModel.loadAndRun(code: code, fileName: fileName)
                             withAnimation {
                                 columnVisibility = .all
                                 preferredCompactColumn = .detail
                             }
                         },
-                        onToggleTerminal: {
+                        onToggleTerminal: { code, fileName in
+                            terminalViewModel.load(code: code, fileName: fileName)
                             withAnimation {
                                 if columnVisibility == .all {
                                     columnVisibility = .doubleColumn
