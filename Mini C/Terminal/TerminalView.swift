@@ -16,8 +16,9 @@ public struct TerminalView: View {
             headerBar
             Divider()
             terminalConsoleBody
-            Divider()
-            inputBar
+                .safeAreaInset(edge: .bottom) {
+                    inputBar
+                }
         }
         .background(Color(uiColor: .systemBackground))
         .navigationTitle("Terminal")
@@ -75,7 +76,7 @@ public struct TerminalView: View {
                     .help("Stop Execution")
                 } else {
                     Button(action: { viewModel.rerun() }) {
-                        Image(systemName: "arrow.clockwise")
+                        Image(systemName: "play.fill")
                             .foregroundStyle(.blue)
                     }
                     .buttonStyle(.plain)
@@ -156,15 +157,9 @@ public struct TerminalView: View {
                     .font(.system(.subheadline, design: .monospaced))
                     .foregroundStyle(.red)
             case .stdin:
-                HStack(spacing: 4) {
-                    Text("❯")
-                        .font(.system(.subheadline, design: .monospaced))
-                        .foregroundStyle(.cyan)
-                    Text(entry.text)
-                        .font(.system(.subheadline, design: .monospaced))
-                        .foregroundStyle(.cyan)
-                        .fontWeight(.medium)
-                }
+                Text("❯ \(entry.text)")
+                    .font(.system(.subheadline, design: .monospaced))
+                    .foregroundStyle(.cyan)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -225,19 +220,15 @@ public struct TerminalView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemBackground))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(
-                            viewModel.status == .waitingForInput ? Color.orange : Color.clear,
-                            lineWidth: 1.5
-                        )
+        .glassEffect(in: Capsule())
+        .overlay(
+            Capsule()
+                .stroke(
+                    viewModel.status == .waitingForInput ? Color.orange : Color.clear,
+                    lineWidth: 1.5
                 )
         )
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(Color(uiColor: .systemBackground))
     }
 }
