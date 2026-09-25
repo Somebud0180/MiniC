@@ -2,6 +2,9 @@ import SwiftUI
 
 struct CodeEditorView: View {
     let fileURL: URL
+    @ObservedObject var terminalViewModel: TerminalViewModel = TerminalViewModel()
+    var onRun: ((String, String) -> Void)? = nil
+    var onToggleTerminal: (() -> Void)? = nil
     
     @State private var content: String = ""
     @State private var originalContent: String = ""
@@ -94,6 +97,35 @@ struct CodeEditorView: View {
         Group {
             if #available(anyAppleOS 27.0, *) {
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    // Run / Stop Execution Button
+                    Button(action: {
+                        if content != originalContent && !isSaving {
+                            saveChanges()
+                        }
+                        if terminalViewModel.isRunning {
+                            terminalViewModel.stop()
+                        } else {
+                            onRun?(content, fileURL.lastPathComponent)
+                        }
+                    }) {
+                        if terminalViewModel.isRunning {
+                            Label("Stop", systemImage: "stop.fill")
+                                .foregroundStyle(.red)
+                        } else {
+                            Label("Run", systemImage: "play.fill")
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    .help(terminalViewModel.isRunning ? "Stop Execution" : "Run Program")
+                    
+                    // Terminal Toggle
+                    Button(action: {
+                        onToggleTerminal?()
+                    }) {
+                        Label("Terminal", systemImage: "terminal")
+                    }
+                    .help("Toggle Terminal")
+                    
                     Button(action: prettifyContent) {
                         Label("Prettify", systemImage: "wand.and.sparkles")
                             .labelStyle(.iconOnly)
@@ -110,7 +142,6 @@ struct CodeEditorView: View {
                         }
                     }
                     .disabled(content == originalContent || isSaving)
-                    
                 }
                 
                 ToolbarOverflowMenu {
@@ -126,6 +157,35 @@ struct CodeEditorView: View {
                 }
             } else {
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    // Run / Stop Execution Button
+                    Button(action: {
+                        if content != originalContent && !isSaving {
+                            saveChanges()
+                        }
+                        if terminalViewModel.isRunning {
+                            terminalViewModel.stop()
+                        } else {
+                            onRun?(content, fileURL.lastPathComponent)
+                        }
+                    }) {
+                        if terminalViewModel.isRunning {
+                            Label("Stop", systemImage: "stop.fill")
+                                .foregroundStyle(.red)
+                        } else {
+                            Label("Run", systemImage: "play.fill")
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    .help(terminalViewModel.isRunning ? "Stop Execution" : "Run Program")
+                    
+                    // Terminal Toggle
+                    Button(action: {
+                        onToggleTerminal?()
+                    }) {
+                        Label("Terminal", systemImage: "terminal")
+                    }
+                    .help("Toggle Terminal")
+                    
                     Button(action: prettifyContent) {
                         Label("Prettify", systemImage: "wand.and.sparkles")
                             .labelStyle(.iconOnly)
@@ -154,7 +214,7 @@ struct CodeEditorView: View {
                                 .labelStyle(.iconOnly)
                         }
                     } label: {
-                        Label("More", systemImage: "elipsis")
+                        Label("More", systemImage: "ellipsis")
                     }
                 }
             }

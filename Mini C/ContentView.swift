@@ -5,8 +5,10 @@ struct ContentView: View {
     let initialFolderURL: URL
     
     @State private var selectedFileURL: URL? = nil
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var columnVisibility: NavigationSplitViewVisibility = .doubleColumn
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
+    
+    @StateObject private var terminalViewModel = TerminalViewModel()
     
     init(folderURL: URL? = nil) {
         self.initialFolderURL = folderURL ?? FileManagerService.shared.documentsDirectory
@@ -21,17 +23,54 @@ struct ContentView: View {
                     preferredCompactColumn: $preferredCompactColumn
                 )
             }
-            .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 400)
-        } detail: {
+            .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
+        } content: {
             Group {
                 if let selectedFileURL {
-                    CodeEditorView(fileURL: selectedFileURL)
-                        .id(selectedFileURL)
+                    CodeEditorView(
+                        fileURL: selectedFileURL,
+                        terminalViewModel: terminalViewModel,
+                        onRun: { code, fileName in
+                            terminalViewModel.run(code: code, fileName: fileName)
+                            withAnimation {
+                                columnVisibility = .all
+                                preferredCompactColumn = .detail
+                            }
+                        },
+                        onToggleTerminal: {
+                            withAnimation {
+                                if columnVisibility == .all {
+                                    columnVisibility = .doubleColumn
+                                } else {
+                                    columnVisibility = .all
+                                    preferredCompactColumn = .detail
+                                }
+                            }
+                        }
+                    )
+                    .id(selectedFileURL)
                 } else {
-                    Color(uiColor: .systemBackground)
-                        .ignoresSafeArea()
+                    ContentUnavailableView(
+                        "No File Selected",
+                        systemImage: "doc.text",
+                        description: Text("Select a C or C++ file to begin editing and running.")
+                    )
                 }
             }
+            .navigationSplitViewColumnWidth(min: 360, ideal: 520, max: .infinity)
+        } detail: {
+            NavigationStack {
+                TerminalView(
+                    viewModel: terminalViewModel,
+                    onClose: {
+                        withAnimation {
+                            columnVisibility = .doubleColumn
+                            preferredCompactColumn = .content
+                        }
+                    }
+                )
+            }
+            .navigationSplitViewColumnWidth(min: 300, ideal: 400, max: 600)
         }
         .navigationSplitViewStyle(.balanced)
     }
@@ -113,7 +152,7 @@ struct FolderExplorerView: View {
                         } else {
                             Button {
                                 selectedFileURL = item.url
-                                preferredCompactColumn = .detail
+                                preferredCompactColumn = .content
                             } label: {
                                 FileRowView(item: item)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -480,7 +519,7 @@ struct FolderExplorerView: View {
             showCreateFileDialog = false
             loadItems()
             selectedFileURL = createdURL
-            preferredCompactColumn = .detail
+            preferredCompactColumn = .content
         } catch {
             showError(error.localizedDescription)
         }
