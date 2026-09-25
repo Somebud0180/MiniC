@@ -14,11 +14,13 @@ public final class CCompilerService: @unchecked Sendable {
     public func compileAndRun(
         source: String,
         fileName: String,
+        fileDirectory: URL? = nil,
         onStdout: @escaping @Sendable (String) -> Void,
         onStderr: @escaping @Sendable (String) -> Void,
         onWaitingForInput: @escaping @Sendable (Bool) -> Void
     ) -> (task: Task<CompilationResult, Never>, interpreter: CInterpreter) {
         let interpreter = CInterpreter()
+        interpreter.fileName = fileName
         interpreter.onStdout = onStdout
         interpreter.onStderr = onStderr
         interpreter.onWaitingForInput = onWaitingForInput
@@ -26,8 +28,16 @@ public final class CCompilerService: @unchecked Sendable {
         let task = Task { () -> CompilationResult in
             do {
                 // Step 1: Preprocessor
-                let preprocessor = CPreprocessor()
-                let preprocessed = preprocessor.process(source: source)
+                let preprocessor = CPreprocessor(fileDirectory: fileDirectory)
+                let preprocessed = preprocessor.process(source: source, fileName: fileName)
+                
+                // Emit preprocessor diagnostics (warnings)
+                for diag in preprocessor.diagnostics {
+                    onStderr(diag)
+                }
+                
+                // Pass included headers to interpreter
+                interpreter.includedHeaders = preprocessor.includedHeaders
                 
                 // Step 2: Lexer
                 let lexer = CLexer(source: preprocessed)

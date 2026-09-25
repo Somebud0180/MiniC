@@ -32,6 +32,11 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
     public var onStderr: (@Sendable (String) -> Void)?
     public var onWaitingForInput: (@Sendable (Bool) -> Void)?
     
+    // File & Library metadata
+    public var fileName: String = ""
+    public var includedHeaders: Set<String> = []
+    private var warnedImplicitFunctions: Set<String> = []
+    
     // Interactive STDIN queue & continuation
     private var stdinBuffer: [String] = []
     private var inputContinuation: CheckedContinuation<String, Error>? = nil
@@ -131,6 +136,7 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         currentScope = globalScope
         functions.removeAll()
         structs.removeAll()
+        warnedImplicitFunctions.removeAll()
         stepCount = 0
         
         CStdLib.registerBuiltins(runtimeIO: self, builtins: &builtins)
@@ -842,12 +848,14 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         
         // Builtin call
         if let builtin = builtins[name] {
+            checkHeaderInclusionForBuiltin(name: name, location: location)
             return try await builtin(args)
         }
         
         // User function call
         guard let funcDef = functions[name] else {
-            throw CRuntimeError("Call to undeclared function '\(name)'", location: location)
+            let errorMsg = undeclaredFunctionError(name: name, location: location)
+            throw CRuntimeError(errorMsg, location: location)
         }
         
         guard let body = funcDef.body else {
@@ -917,5 +925,76 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         default:
             return nil
         }
+    }
+    
+    // MARK: - Header & Undeclared Function Diagnostics
+    
+    private func checkHeaderInclusionForBuiltin(name: String, location: SourceLocation) {
+        guard let requiredHeader = CStdLib.functionToHeader[name] else { return }
+        let baseHeader = requiredHeader.replacingOccurrences(of: "<", with: "").replacingOccurrences(of: ">", with: "")
+        let baseWithoutExt = baseHeader.hasSuffix(".h") ? String(baseHeader.dropLast(2)) : baseHeader
+        
+        let isIncluded = includedHeaders.contains(baseHeader) ||
+                         includedHeaders.contains("<\(baseHeader)>") ||
+                         includedHeaders.contains(baseWithoutExt) ||
+                         includedHeaders.contains("<\(baseWithoutExt)>") ||
+                         includedHeaders.contains("c\(baseWithoutExt)")
+        
+        if !isIncluded && !warnedImplicitFunctions.contains(name) {
+            warnedImplicitFunctions.insert(name)
+            let filePrefix = fileName.isEmpty ? "" : "\(fileName):\(location.line): "
+            writeStderr("\(filePrefix)warning: implicit declaration of library function '\(name)'; did you forget to '#include \(requiredHeader)'?\n")
+        }
+    }
+    
+    private func undeclaredFunctionError(name: String, location: SourceLocation) -> String {
+        // 1. Check if it's a known unsupported standard/POSIX function
+        if let info = CStdLib.unsupportedStandardFunctions[name] {
+            return "Call to undeclared function '\(name)'. Note: \(info.reason)."
+        }
+        
+        // 2. Check if it's a known standard function from a library that was not included
+        if let header = CStdLib.functionToHeader[name] {
+            return "Call to undeclared function '\(name)'. Did you forget to #include \(header)?"
+        }
+        
+        // 3. Typo suggestion against all builtins and declared functions
+        let candidates: [String] = Array(builtins.keys) + Array(functions.keys)
+        var bestMatch: String? = nil
+        var minDistance = 3 // Only suggest if edit distance <= 2
+        for candidate in candidates {
+            let dist = levenshteinDistance(name, candidate)
+            if dist < minDistance {
+                minDistance = dist
+                bestMatch = candidate
+            }
+        }
+        if let match = bestMatch {
+            return "Call to undeclared function '\(name)'. Did you mean '\(match)'?"
+        }
+        
+        return "Call to undeclared function '\(name)'"
+    }
+    
+    private func levenshteinDistance(_ s1: String, _ s2: String) -> Int {
+        let a = Array(s1)
+        let b = Array(s2)
+        if a.isEmpty { return b.count }
+        if b.isEmpty { return a.count }
+        
+        var dist = [[Int]](repeating: [Int](repeating: 0, count: b.count + 1), count: a.count + 1)
+        for i in 0...a.count { dist[i][0] = i }
+        for j in 0...b.count { dist[0][j] = j }
+        
+        for i in 1...a.count {
+            for j in 1...b.count {
+                if a[i - 1] == b[j - 1] {
+                    dist[i][j] = dist[i - 1][j - 1]
+                } else {
+                    dist[i][j] = min(dist[i - 1][j] + 1, dist[i][j - 1] + 1, dist[i - 1][j - 1] + 1)
+                }
+            }
+        }
+        return dist[a.count][b.count]
     }
 }

@@ -105,6 +105,7 @@ public final class TerminalViewModel: ObservableObject {
         let (task, interpreter) = CCompilerService.shared.compileAndRun(
             source: code,
             fileName: fileName,
+            fileDirectory: FileManagerService.shared.documentsDirectory,
             onStdout: { [weak self] text in
                 guard let self else { return }
                 Task { @MainActor [weak self] in
