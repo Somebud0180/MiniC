@@ -286,7 +286,7 @@ class CodeEditorContainerView: UIView {
             textView.textContainerInset = newInsets
         }
         
-        let scrollInsets = UIEdgeInsets(top: 0, left: 0, bottom: effectiveBottomInset, right: safeAreaInsets.right)
+        let scrollInsets = UIEdgeInsets(top: 0, left: 0, bottom: effectiveBottomInset, right: 0)
         if textView.verticalScrollIndicatorInsets != scrollInsets {
             textView.verticalScrollIndicatorInsets = scrollInsets
         }
