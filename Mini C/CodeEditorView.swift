@@ -101,7 +101,7 @@ struct CodeEditorView: View {
                     // Arithmetic & Bitwise/Logical operators
                     keyGroup(["+", "-", "*", "/", "%", "&", "|", "!"])
                 }
-                .padding(.horizontal, 6)
+                .padding(.trailing, 8)
             }
             .clipShape(Capsule())
             
@@ -117,26 +117,23 @@ struct CodeEditorView: View {
                 Image(systemName: isEditorFocused ? "keyboard.chevron.compact.down" : "keyboard")
                     .font(.system(size: 18, weight: .medium))
                     .foregroundStyle(Color.primary)
-                    .frame(width: 40, height: 36, alignment: .center)
+                    .frame(minWidth: 40, minHeight: 36, alignment: .center)
                     .background(
                         UnevenRoundedRectangle(
-                            topLeadingRadius: 8,
-                            bottomLeadingRadius: 8,
+                            topLeadingRadius: 9,
+                            bottomLeadingRadius: 9,
                             bottomTrailingRadius: 18,
                             topTrailingRadius: 18,
                             style: .continuous
                         )
-                        .fill(Color(uiColor: .tertiarySystemFill))
+                        .fill(Color(uiColor: .secondarySystemFill))
                     )
             }
             .buttonStyle(.plain)
         }
         .padding(.vertical, 12)
         .padding(.horizontal, 12)
-        .background(
-            Capsule()
-                .glassEffect()
-        )
+        .glassEffect(in: Capsule())
         .padding(.horizontal, 12)
         .safeAreaPadding(.bottom)
         .transition(.move(edge: .bottom).combined(with: .opacity))
