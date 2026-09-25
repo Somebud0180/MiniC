@@ -11,6 +11,7 @@ struct CodeEditorView: View {
     @State private var errorMessage: String? = nil
     @State private var showSaveSuccess: Bool = false
     @State private var showDetailsSheet: Bool = false
+    @State private var isHeaderCollapsed: Bool = false
     
     // Reference handler to insert text at cursor position in editor
     @State private var textInserter: ((String) -> Void)? = nil
@@ -71,12 +72,18 @@ struct CodeEditorView: View {
                 }
             }
         }
+        .toolbar(isHeaderCollapsed ? .hidden : .visible, for: .navigationBar)
         .task {
             loadFileContent()
         }
         .sheet(isPresented: $showDetailsSheet) {
             fileDetailsSheet
                 .presentationDetents([.medium])
+        }
+        .onChange(of: isEditorFocused) {
+            withAnimation(.smooth) {
+                isHeaderCollapsed = isEditorFocused
+            }
         }
     }
     
@@ -219,6 +226,11 @@ struct CodeEditorView: View {
             .safeAreaPadding(.horizontal)
             .padding(.vertical, 8)
             .background(Color(uiColor: .secondarySystemBackground))
+            .onTapGesture {
+                withAnimation(.smooth) {
+                    isHeaderCollapsed = !isHeaderCollapsed
+                }
+            }
             
             Divider()
             

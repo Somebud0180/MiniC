@@ -1,8 +1,48 @@
 import SwiftUI
 
 struct ContentView: View {
-    /// The current directory URL being viewed (defaults to root app Documents directory).
-    let currentFolderURL: URL
+    /// The root folder URL being browsed (defaults to documents directory).
+    let initialFolderURL: URL
+    
+    @State private var selectedFileURL: URL? = nil
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
+    
+    init(folderURL: URL? = nil) {
+        self.initialFolderURL = folderURL ?? FileManagerService.shared.documentsDirectory
+    }
+    
+    var body: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility, preferredCompactColumn: $preferredCompactColumn) {
+            NavigationStack {
+                FolderExplorerView(
+                    folderURL: initialFolderURL,
+                    selectedFileURL: $selectedFileURL,
+                    preferredCompactColumn: $preferredCompactColumn
+                )
+            }
+            .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 400)
+        } detail: {
+            Group {
+                if let selectedFileURL {
+                    CodeEditorView(fileURL: selectedFileURL)
+                        .id(selectedFileURL)
+                } else {
+                    Color(uiColor: .systemBackground)
+                        .ignoresSafeArea()
+                }
+            }
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+}
+
+// MARK: - Folder Explorer View (Sidebar)
+
+struct FolderExplorerView: View {
+    let folderURL: URL
+    @Binding var selectedFileURL: URL?
+    @Binding var preferredCompactColumn: NavigationSplitViewColumn
     
     @State private var items: [FileItem] = []
     @State private var searchText: String = ""
@@ -26,8 +66,8 @@ struct ContentView: View {
     @State private var alertErrorMessage: String? = nil
     @State private var showAlertError: Bool = false
     
-    init(folderURL: URL? = nil) {
-        self.currentFolderURL = folderURL ?? FileManagerService.shared.documentsDirectory
+    var isRootDirectory: Bool {
+        folderURL.path == FileManagerService.shared.documentsDirectory.path
     }
     
     var filteredItems: [FileItem] {
@@ -37,34 +77,17 @@ struct ContentView: View {
         return items.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
     }
     
-    var isRootDirectory: Bool {
-        currentFolderURL.path == FileManagerService.shared.documentsDirectory.path
-    }
-    
     var body: some View {
-        Group {
-            if isRootDirectory {
-                NavigationStack {
-                    explorerList
-                        .navigationTitle("Mini C")
-                        .navigationBarTitleDisplayMode(.large)
-                        .refreshable {
-                            loadItems()
-                        }
-                }
-            } else {
-                explorerList
-                    .navigationTitle(currentFolderURL.lastPathComponent)
-                    .navigationBarTitleDisplayMode(.inline)
-                    .refreshable {
-                        loadItems()
-                    }
+        explorerList
+            .navigationTitle(isRootDirectory ? "Mini C" : folderURL.lastPathComponent)
+            .navigationBarTitleDisplayMode(isRootDirectory ? .large : .inline)
+            .refreshable {
+                loadItems()
             }
-        }
-        .searchable(text: $searchText, prompt: "Search files and folders")
-        .task {
-            loadItems()
-        }
+            .searchable(text: $searchText, prompt: "Search files and folders")
+            .task {
+                loadItems()
+            }
     }
     
     private var explorerList: some View {
@@ -87,9 +110,18 @@ struct ContentView: View {
                                 contextMenuItems(for: item)
                             }
                         } else {
-                            NavigationLink(destination: CodeEditorView(fileURL: item.url)) {
+                            Button {
+                                selectedFileURL = item.url
+                                preferredCompactColumn = .detail
+                            } label: {
                                 FileRowView(item: item)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
                             }
+                            .buttonStyle(.plain)
+                            .listRowBackground(
+                                selectedFileURL == item.url ? Color.accentColor.opacity(0.15) : nil
+                            )
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 deleteButton(for: item)
                                 renameButton(for: item)
@@ -105,7 +137,7 @@ struct ContentView: View {
                         Text("\(filteredItems.count) item\(filteredItems.count == 1 ? "" : "s")")
                         Spacer()
                         if !isRootDirectory {
-                            Text(currentFolderURL.lastPathComponent)
+                            Text(folderURL.lastPathComponent)
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                         }
@@ -115,7 +147,11 @@ struct ContentView: View {
         }
         .navigationDestination(for: FileItem.self) { item in
             if item.isDirectory {
-                ContentView(folderURL: item.url)
+                FolderExplorerView(
+                    folderURL: item.url,
+                    selectedFileURL: $selectedFileURL,
+                    preferredCompactColumn: $preferredCompactColumn
+                )
             }
         }
         .toolbar {
@@ -426,14 +462,16 @@ struct ContentView: View {
     // MARK: - Helper Actions
     
     private func loadItems() {
-        items = FileManagerService.shared.contentsOfDirectory(at: currentFolderURL)
+        items = FileManagerService.shared.contentsOfDirectory(at: folderURL)
     }
     
     private func createFile() {
         do {
-            try FileManagerService.shared.createFile(name: newFileName, type: newFileType, in: currentFolderURL)
+            let createdURL = try FileManagerService.shared.createFile(name: newFileName, type: newFileType, in: folderURL)
             showCreateFileDialog = false
             loadItems()
+            selectedFileURL = createdURL
+            preferredCompactColumn = .detail
         } catch {
             showError(error.localizedDescription)
         }
@@ -441,7 +479,7 @@ struct ContentView: View {
     
     private func createFolder() {
         do {
-            try FileManagerService.shared.createFolder(name: newFolderName, in: currentFolderURL)
+            try FileManagerService.shared.createFolder(name: newFolderName, in: folderURL)
             showCreateFolderDialog = false
             loadItems()
         } catch {
@@ -457,7 +495,10 @@ struct ContentView: View {
     private func performRename() {
         guard let item = itemToRename else { return }
         do {
-            try FileManagerService.shared.renameItem(at: item.url, to: renameInput)
+            let newURL = try FileManagerService.shared.renameItem(at: item.url, to: renameInput)
+            if selectedFileURL == item.url {
+                selectedFileURL = newURL
+            }
             itemToRename = nil
             loadItems()
         } catch {
@@ -469,6 +510,9 @@ struct ContentView: View {
         guard let item = itemToDelete else { return }
         do {
             try FileManagerService.shared.deleteItem(at: item.url)
+            if selectedFileURL == item.url || (item.isDirectory && selectedFileURL?.path.hasPrefix(item.url.path) == true) {
+                selectedFileURL = nil
+            }
             itemToDelete = nil
             loadItems()
         } catch {
