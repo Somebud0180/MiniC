@@ -5,7 +5,7 @@ struct ContentView: View {
     let initialFolderURL: URL
     
     @State private var selectedFileURL: URL? = nil
-    @State private var columnVisibility: NavigationSplitViewVisibility = .doubleColumn
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
     
     @StateObject private var terminalViewModel = TerminalViewModel()
@@ -28,8 +28,11 @@ struct ContentView: View {
             Group {
                 if let selectedFileURL {
                     CodeEditorView(
-                        fileURL: selectedFileURL,
                         terminalViewModel: terminalViewModel,
+                        fileURL: selectedFileURL,
+                        onOpen: { code, fileName in
+                            terminalViewModel.load(code: code, fileName: fileName)
+                        },
                         onRun: { code, fileName in
                             terminalViewModel.loadAndRun(code: code, fileName: fileName)
                             withAnimation {
@@ -37,8 +40,7 @@ struct ContentView: View {
                                 preferredCompactColumn = .detail
                             }
                         },
-                        onToggleTerminal: { code, fileName in
-                            terminalViewModel.load(code: code, fileName: fileName)
+                        onToggleTerminal: {
                             withAnimation {
                                 if columnVisibility == .all {
                                     columnVisibility = .doubleColumn
@@ -269,6 +271,22 @@ struct FolderExplorerView: View {
                 }
             }
         }
+        .contextMenu {
+            Button(action: {
+                newFileName = ""
+                newFileType = .c
+                showCreateFileDialog = true
+            }) {
+                Label("New File", systemImage: "doc.badge.plus")
+            }
+            
+            Button(action: {
+                newFolderName = ""
+                showCreateFolderDialog = true
+            }) {
+                Label("New Folder", systemImage: "folder.badge.plus")
+            }
+        }
         .navigationDestination(for: FileItem.self) { item in
             if item.isDirectory {
                 FolderExplorerView(
@@ -311,7 +329,7 @@ struct FolderExplorerView: View {
         }
         .sheet(isPresented: $showCreateFileDialog) {
             createFileSheet
-                .presentationDetents([.medium])
+                .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showMoveSheet) {
             if let item = itemToMove {
@@ -537,34 +555,27 @@ struct FolderExplorerView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             
-            HStack(spacing: 12) {
+            VStack(spacing: 12) {
                 Button(action: {
                     newFileName = ""
                     newFileType = .c
                     showCreateFileDialog = true
                 }) {
-                    Label("New .c", systemImage: "plus")
+                    Label("New file", systemImage: "doc.badge.plus")
+                        .foregroundStyle(.primary)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
                 
                 Button(action: {
-                    newFileName = ""
-                    newFileType = .cpp
-                    showCreateFileDialog = true
-                }) {
-                    Label("New .cpp", systemImage: "plus")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.purple)
-                
-                Button(action: {
                     newFolderName = ""
                     showCreateFolderDialog = true
                 }) {
-                    Label("Folder", systemImage: "folder.badge.plus")
+                    Label("New Folder", systemImage: "folder.badge.plus")
+                        .foregroundStyle(.primary)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
+                .tint(.secondary)
             }
         }
         .padding(.vertical, 32)

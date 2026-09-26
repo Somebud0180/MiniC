@@ -1,10 +1,12 @@
 import SwiftUI
 
 struct CodeEditorView: View {
-    let fileURL: URL
+    @Environment(\.verticalSizeClass) var verticalSizeClass
     @ObservedObject var terminalViewModel: TerminalViewModel = TerminalViewModel()
+    let fileURL: URL
+    var onOpen: ((String, String) -> Void)? = nil
     var onRun: ((String, String) -> Void)? = nil
-    var onToggleTerminal: ((String, String) -> Void)? = nil
+    var onToggleTerminal: (() -> Void)? = nil
     
     @State private var content: String = ""
     @State private var originalContent: String = ""
@@ -66,12 +68,15 @@ struct CodeEditorView: View {
                             .transition(.move(edge: .top).combined(with: .opacity))
                         }
                     }
+                    .onAppear {
+                        onOpen?(content, fileURL.lastPathComponent)
+                    }
             }
         }
         .navigationTitle(fileURL.lastPathComponent)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { topToolbar }
-        .toolbar(isHeaderCollapsed ? .hidden : .visible, for: .navigationBar)
+        .toolbar(isHeaderCollapsed && verticalSizeClass == .compact ? .hidden : .visible, for: .navigationBar)
         .task {
             loadFileContent()
         }
@@ -120,7 +125,7 @@ struct CodeEditorView: View {
                     
                     // Terminal Toggle
                     Button(action: {
-                        onToggleTerminal?(content, fileURL.lastPathComponent)
+                        onToggleTerminal?()
                     }) {
                         Label("Terminal", systemImage: "terminal")
                     }
@@ -180,7 +185,7 @@ struct CodeEditorView: View {
                     
                     // Terminal Toggle
                     Button(action: {
-                        onToggleTerminal?(content, fileURL.lastPathComponent)
+                        onToggleTerminal?()
                     }) {
                         Label("Terminal", systemImage: "terminal")
                     }
@@ -342,11 +347,11 @@ struct CodeEditorView: View {
                 if let type = fileItem.fileType {
                     Label(type.displayName, systemImage: type.systemIcon)
                         .font(.caption)
+                        .lineLimit(1)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(type.badgeColor.opacity(0.15))
                         .foregroundStyle(type.badgeColor)
-                        .clipShape(Capsule())
+                        .background(type.badgeColor.opacity(0.15), in: Capsule())
                 }
                 
                 Spacer()
@@ -354,10 +359,11 @@ struct CodeEditorView: View {
                 Text("\(lineCount) lines • \(characterCount) chars")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            .padding(.horizontal)
             .safeAreaPadding(.horizontal)
             .padding(.vertical, 8)
+            .frame(minHeight: 24)
             .background(Color(uiColor: .secondarySystemBackground))
             .onTapGesture {
                 withAnimation(.smooth) {

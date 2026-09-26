@@ -1,9 +1,11 @@
 import SwiftUI
 
 public struct TerminalView: View {
+    @Environment(\.verticalSizeClass) var verticalSizeClass
     @ObservedObject public var viewModel: TerminalViewModel
     public var onClose: (() -> Void)? = nil
     
+    @State private var isHeaderCollapsed: Bool = false
     @FocusState private var isInputFocused: Bool
     
     public init(viewModel: TerminalViewModel, onClose: (() -> Void)? = nil) {
@@ -23,14 +25,10 @@ public struct TerminalView: View {
         .background(Color(uiColor: .systemBackground))
         .navigationTitle("Terminal")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                if let onClose = onClose {
-                    Button(action: onClose) {
-                        Image(systemName: "sidebar.trailing")
-                    }
-                    .help("Collapse Terminal")
-                }
+        .toolbar(isHeaderCollapsed && verticalSizeClass == .compact ? .hidden : .visible, for: .navigationBar)
+        .onChange(of: isInputFocused) {
+            withAnimation(.smooth) {
+                isHeaderCollapsed = isInputFocused
             }
         }
     }
@@ -38,21 +36,15 @@ public struct TerminalView: View {
     // MARK: - Header Bar
     
     private var headerBar: some View {
-        HStack(spacing: 12) {
+        HStack {
             // Status Badge
-            HStack(spacing: 6) {
-                Image(systemName: viewModel.status.systemIcon)
-                    .foregroundStyle(viewModel.status.color)
-                    .imageScale(.small)
-                
-                Text(viewModel.status.label)
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(viewModel.status.color)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(viewModel.status.color.opacity(0.12), in: Capsule())
+            Label(viewModel.status.label, systemImage: viewModel.status.systemIcon)
+                .font(.caption)
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .foregroundStyle(viewModel.status.color)
+                .background(viewModel.status.color.opacity(0.12), in: Capsule())
             
             if !viewModel.currentFileName.isEmpty {
                 Text(viewModel.currentFileName)
@@ -64,7 +56,7 @@ public struct TerminalView: View {
             Spacer()
             
             // Actions
-            HStack(spacing: 6) {
+            HStack(spacing: 12) {
                 if viewModel.isRunning {
                     Button(action: { viewModel.stop() }) {
                         Image(systemName: "stop.fill")
@@ -95,9 +87,15 @@ public struct TerminalView: View {
                 .help("Clear Terminal")
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .safeAreaPadding(.horizontal)
+        .padding(.vertical, 4)
+        .frame(minHeight: 24)
         .background(Color(uiColor: .secondarySystemBackground))
+        .onTapGesture {
+            withAnimation(.smooth) {
+                isHeaderCollapsed = !isHeaderCollapsed
+            }
+        }
     }
     
     // MARK: - Terminal Console Body
