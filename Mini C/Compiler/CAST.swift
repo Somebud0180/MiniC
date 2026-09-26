@@ -111,7 +111,7 @@ public indirect enum CType: Equatable, Sendable, CustomStringConvertible {
         case .pointer, .reference, .rvalueReference, .mapType, .smartPointerType, .functionType:
             return 8
         case .array(let elem, let count):
-            return (count ?? 1) * elem.abiSize
+            return (count ?? 0) * elem.abiSize
         case .void:
             return 0
         default:
@@ -435,6 +435,8 @@ public indirect enum CExpr: Sendable {
     case sizeofType(CType, SourceLocation)
     case sizeofExpr(CExpr, SourceLocation)
     case initializerList([CExpr], SourceLocation)
+    case designatedInit(field: String?, indexExpr: CExpr?, value: CExpr, SourceLocation)
+    case compoundLiteral(CType, CExpr, SourceLocation)
     case lambda(captures: [String], params: [(type: CType, name: String, isRef: Bool)], body: CStmt, SourceLocation)
     case newExpr(type: CType, args: [CExpr], SourceLocation)
     
@@ -458,6 +460,8 @@ public indirect enum CExpr: Sendable {
              .sizeofType(_, let loc),
              .sizeofExpr(_, let loc),
              .initializerList(_, let loc),
+             .designatedInit(_, _, _, let loc),
+             .compoundLiteral(_, _, let loc),
              .lambda(_, _, _, let loc),
              .newExpr(_, _, let loc):
             return loc
@@ -469,7 +473,7 @@ public indirect enum CExpr: Sendable {
 
 public indirect enum CStmt: Sendable {
     case block([CStmt], SourceLocation)
-    case variableDecl(type: CType, name: String, initExpr: CExpr?, isConst: Bool, SourceLocation)
+    case variableDecl(type: CType, name: String, sizeExpr: CExpr?, initExpr: CExpr?, isConst: Bool, SourceLocation)
     case expr(CExpr, SourceLocation)
     case ifStmt(condition: CExpr, thenStmt: CStmt, elseStmt: CStmt?, SourceLocation)
     case whileStmt(condition: CExpr, body: CStmt, SourceLocation)
@@ -479,14 +483,14 @@ public indirect enum CStmt: Sendable {
     case returnStmt(CExpr?, SourceLocation)
     case breakStmt(SourceLocation)
     case continueStmt(SourceLocation)
-    case structDecl(name: String, fields: [(type: CType, name: String)], location: SourceLocation)
+    case structDecl(name: String, fields: [(type: CType, name: String)], isUnion: Bool, location: SourceLocation)
     case funcDecl(returnType: CType, name: String, params: [(type: CType, name: String, isRef: Bool)], body: CStmt?, SourceLocation)
     case usingNamespace(String, SourceLocation)
     
     public var location: SourceLocation {
         switch self {
         case .block(_, let loc),
-             .variableDecl(_, _, _, _, let loc),
+             .variableDecl(_, _, _, _, _, let loc),
              .expr(_, let loc),
              .ifStmt(_, _, _, let loc),
              .whileStmt(_, _, let loc),
@@ -496,7 +500,7 @@ public indirect enum CStmt: Sendable {
              .returnStmt(_, let loc),
              .breakStmt(let loc),
              .continueStmt(let loc),
-             .structDecl(_, _, let loc),
+             .structDecl(_, _, _, let loc),
              .funcDecl(_, _, _, _, let loc),
              .usingNamespace(_, let loc):
             return loc

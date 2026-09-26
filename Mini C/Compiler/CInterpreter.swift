@@ -141,6 +141,8 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         }
         
         let funcScope = Scope(parent: globalScope)
+        let funcNameAddr = memory.allocateCString(name)
+        funcScope.define(name: "__func__", address: funcNameAddr, type: .pointer(.char))
         for (i, param) in funcDef.params.enumerated() {
             let val = i < args.count ? args[i] : .int(0)
             let addr = memory.allocate(value: val)
@@ -181,9 +183,9 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                 } else {
                     functions[name] = (params: params, body: body)
                 }
-            case .structDecl(let name, let fields, _):
+            case .structDecl(let name, let fields, let isUnion, _):
                 structs[name] = fields
-                let layout = RecordLayoutEngine.computeLayout(fields: fields, isUnion: false, structLayouts: memory.structLayouts)
+                let layout = RecordLayoutEngine.computeLayout(fields: fields, isUnion: isUnion, structLayouts: memory.structLayouts)
                 memory.structLayouts[name] = layout
             case .usingNamespace:
                 break
@@ -260,7 +262,31 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                 throw error
             }
             
-        case .variableDecl(let type, let name, let initExpr, let isConst, let location):
+        case .variableDecl(let type, let name, let sizeExpr, let initExpr, let isConst, let location):
+            if let sizeExpr = sizeExpr {
+                let evaluatedSize = try await evaluate(sizeExpr).asInt
+                let count = max(Int(evaluatedSize), 1)
+                let elemType = type.pointeeType ?? .char
+                let elemSize = elemType.abiSize
+                let totalBytes = count * elemSize
+                let addr = memory.allocateBlock(count: count, elementSize: elemSize)
+                currentScope.define(name: name, address: addr, type: type, isConst: isConst)
+                currentScope.setVLASize(name: name, size: totalBytes)
+                return
+            }
+            if case .array(_, let arrCount) = type, let initExpr = initExpr {
+                if case .literalString(let str, _) = initExpr {
+                    let strBytes = Array(str.utf8)
+                    let count = max(arrCount ?? (strBytes.count + 1), strBytes.count + 1)
+                    let addr = memory.allocateBlock(count: count, elementSize: 1)
+                    for (i, b) in strBytes.enumerated() {
+                        memory.write(address: addr + i, value: .char(b))
+                    }
+                    memory.write(address: addr + strBytes.count, value: .char(0))
+                    currentScope.define(name: name, address: addr, type: type, isConst: isConst)
+                    return
+                }
+            }
             var initialValue: CValue = .int(0)
             if let initExpr = initExpr {
                 if case .initializerList(let items, _) = initExpr {
@@ -272,16 +298,53 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                             memory.vectorPushBack(id: vecId, value: val)
                         }
                         initialValue = .vectorInstance(vecId)
+                    case .structType(let sName), .unionType(let sName):
+                        var fieldMap: [String: CValue] = [:]
+                        let fields = structs[sName] ?? []
+                        for f in fields { fieldMap[f.name] = .int(0) }
+                        var unnamedIdx = 0
+                        for it in items {
+                            if case .designatedInit(let fName, _, let valExpr, _) = it, let fName = fName {
+                                fieldMap[fName] = try await evaluate(valExpr)
+                            } else {
+                                if unnamedIdx < fields.count {
+                                    fieldMap[fields[unnamedIdx].name] = try await evaluate(it)
+                                    unnamedIdx += 1
+                                }
+                            }
+                        }
+                        let (_, baseAddr) = memory.createStructInstance(name: sName, fields: fieldMap)
+                        currentScope.define(name: name, address: baseAddr, type: type, isConst: isConst)
+                        return
                     default:
                         // Array initialization
-                        let elemSize = type.pointeeType?.abiSize ?? 8
-                        let addr = memory.allocateBlock(count: max(items.count, 1), elementSize: elemSize)
-                        for (i, it) in items.enumerated() {
-                            var v = try await evaluate(it)
-                            if let elemType = type.pointeeType, elemType.isInteger {
-                                v = CValue.truncate(value: v.asInt, to: elemType)
+                        let elemType = type.pointeeType ?? .int
+                        let elemSize = elemType.abiSize
+                        let count: Int
+                        if case .array(_, let explicitCount) = type, let c = explicitCount {
+                            count = c
+                        } else {
+                            count = max(items.count, 1)
+                        }
+                        let addr = memory.allocateBlock(count: max(count, 1), elementSize: elemSize)
+                        var nextIdx = 0
+                        for it in items {
+                            if case .designatedInit(_, let idxExpr, let valExpr, _) = it, let idxExpr = idxExpr {
+                                let idxVal = Int(try await evaluate(idxExpr).asInt)
+                                var v = try await evaluate(valExpr)
+                                if elemType.isInteger {
+                                    v = CValue.truncate(value: v.asInt, to: elemType)
+                                }
+                                memory.write(address: addr + idxVal * elemSize, value: v)
+                                nextIdx = idxVal + 1
+                            } else {
+                                var v = try await evaluate(it)
+                                if elemType.isInteger {
+                                    v = CValue.truncate(value: v.asInt, to: elemType)
+                                }
+                                memory.write(address: addr + nextIdx * elemSize, value: v)
+                                nextIdx += 1
                             }
-                            memory.write(address: addr + i * elemSize, value: v)
                         }
                         currentScope.define(name: name, address: addr, type: type, isConst: isConst)
                         return
@@ -303,7 +366,7 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                     initialValue = .mapInstance(mapId)
                 case .stringType:
                     initialValue = .string("")
-                case .structType(let sName):
+                case .structType(let sName), .unionType(let sName):
                     var fieldMap: [String: CValue] = [:]
                     if let fields = structs[sName] {
                         for f in fields { fieldMap[f.name] = .int(0) }
@@ -480,9 +543,9 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         case .continueStmt:
             throw CRuntimeControl.continueSignal
             
-        case .structDecl(let name, let fields, _):
+        case .structDecl(let name, let fields, let isUnion, _):
             structs[name] = fields
-            let layout = RecordLayoutEngine.computeLayout(fields: fields, isUnion: false, structLayouts: memory.structLayouts)
+            let layout = RecordLayoutEngine.computeLayout(fields: fields, isUnion: isUnion, structLayouts: memory.structLayouts)
             memory.structLayouts[name] = layout
             
         case .funcDecl(_, let name, let params, let body, _):
@@ -525,6 +588,15 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                     return .string(lookupName)
                 }
                 throw CRuntimeError("Undefined variable '\(lookupName)'", location: loc)
+            }
+            if let varType = currentScope.resolveType(name: lookupName), case .array = varType {
+                return .pointer(addr)
+            }
+            if let sid = memory.addressToStructId[addr], let varType = currentScope.resolveType(name: lookupName) {
+                switch varType {
+                case .structType, .unionType: return .structInstance(sid)
+                default: break
+                }
             }
             return memory.read(address: addr)
             
@@ -654,7 +726,12 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                 return memory.mapGet(id: mid, key: keyStr) ?? .int(0)
             case .pointer(let baseAddr):
                 let index = try await evaluate(indexExpr).asInt
-                let pointeeSize = memory.pointerPointeeSizes[baseAddr] ?? 8
+                var pointeeSize = memory.pointerPointeeSizes[baseAddr] ?? 1
+                if case .identifier(let arrName, _, _) = arrExpr,
+                   let arrType = currentScope.resolveType(name: arrName),
+                   let elemType = arrType.pointeeType {
+                    pointeeSize = elemType.abiSize
+                }
                 return memory.read(address: baseAddr + Int(index) * pointeeSize)
             case .vectorInstance(let vid):
                 let index = try await evaluate(indexExpr).asInt
@@ -672,13 +749,20 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             var objVal = try await evaluate(objExpr)
             if isArrow {
                 if case .pointer(let addr) = objVal {
-                    let memVal = memory.read(address: addr)
-                    if case .structInstance = memVal {
-                        objVal = memVal
+                    if let sid = memory.addressToStructId[addr] {
+                        objVal = .structInstance(sid)
                     } else {
-                        for layout in memory.structLayouts.values {
-                            if let m = layout.memberMap[member] {
-                                return memory.read(address: addr + m.offset)
+                        let memVal = memory.read(address: addr)
+                        if case .structInstance = memVal {
+                            objVal = memVal
+                        } else {
+                            for layout in memory.structLayouts.values {
+                                if let m = layout.memberMap[member] {
+                                    if case .array = m.type {
+                                        return .pointer(addr + m.offset)
+                                    }
+                                    return memory.read(address: addr + m.offset)
+                                }
                             }
                         }
                     }
@@ -689,12 +773,22 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             if case .vectorInstance(let vid) = objVal {
                 if member == "size" { return .int(Int64(memory.vectorSize(id: vid))) }
                 if member == "empty" { return .bool(memory.vectorSize(id: vid) == 0) }
+                if member == "begin" { return .vectorIterator(vid: vid, index: 0) }
+                if member == "end" { return .vectorIterator(vid: vid, index: memory.vectorSize(id: vid)) }
+                if member == "front" { return memory.vectorGet(id: vid, index: 0) }
+                if member == "back" { return memory.vectorGet(id: vid, index: max(0, memory.vectorSize(id: vid) - 1)) }
+                if member == "rbegin" { return .vectorIterator(vid: vid, index: max(0, memory.vectorSize(id: vid) - 1)) }
+                if member == "rend" { return .vectorIterator(vid: vid, index: -1) }
             }
             
             // Check string methods
             if case .string(let s) = objVal {
                 if member == "length" || member == "size" { return .int(Int64(s.count)) }
                 if member == "empty" { return .bool(s.isEmpty) }
+                if member == "begin" { return .int(0) }
+                if member == "end" { return .int(Int64(s.count)) }
+                if member == "front" { return .char(s.utf8.first ?? 0) }
+                if member == "back" { return .char(s.utf8.reversed().first ?? 0) }
             }
             
             // Check smart pointer methods
@@ -731,20 +825,91 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             if case .structType(let sName) = type, let layout = memory.structLayouts[sName] {
                 return .int(Int64(layout.size))
             }
+            if case .unionType(let sName) = type, let layout = memory.structLayouts[sName] {
+                return .int(Int64(layout.size))
+            }
             return .int(Int64(type.abiSize))
             
         case .sizeofExpr(let expr, _):
-            if case .identifier(let name, _, _) = expr, let type = currentScope.resolveType(name: name) {
-                if case .structType(let sName) = type, let layout = memory.structLayouts[sName] {
-                    return .int(Int64(layout.size))
+            if case .identifier(let name, _, _) = expr {
+                if let vlaSize = currentScope.resolveVLASize(name: name) {
+                    return .int(Int64(vlaSize))
                 }
-                return .int(Int64(type.abiSize))
+                if let type = currentScope.resolveType(name: name) {
+                    if case .structType(let sName) = type, let layout = memory.structLayouts[sName] {
+                        return .int(Int64(layout.size))
+                    }
+                    if case .unionType(let sName) = type, let layout = memory.structLayouts[sName] {
+                        return .int(Int64(layout.size))
+                    }
+                    return .int(Int64(type.abiSize))
+                }
             }
             let val = try await evaluate(expr)
             if case .string(let s) = val {
                 return .int(Int64(s.utf8.count + 1))
             }
             return .int(8)
+            
+        case .designatedInit(_, _, let val, _):
+            return try await evaluate(val)
+            
+        case .compoundLiteral(let type, let initExpr, _):
+            switch type {
+            case .structType(let sName), .unionType(let sName):
+                var fieldMap: [String: CValue] = [:]
+                let fields = structs[sName] ?? []
+                for f in fields { fieldMap[f.name] = .int(0) }
+                if case .initializerList(let items, _) = initExpr {
+                    var unnamedIdx = 0
+                    for it in items {
+                        if case .designatedInit(let fName, _, let valExpr, _) = it, let fName = fName {
+                            fieldMap[fName] = try await evaluate(valExpr)
+                        } else {
+                            if unnamedIdx < fields.count {
+                                fieldMap[fields[unnamedIdx].name] = try await evaluate(it)
+                                unnamedIdx += 1
+                            }
+                        }
+                    }
+                }
+                let (_, baseAddr) = memory.createStructInstance(name: sName, fields: fieldMap)
+                return .pointer(baseAddr)
+            default:
+                let elemType = type.pointeeType ?? .int
+                let elemSize = elemType.abiSize
+                var items: [CExpr] = []
+                if case .initializerList(let it, _) = initExpr {
+                    items = it
+                }
+                let count: Int
+                if case .array(_, let explicitCount) = type, let c = explicitCount {
+                    count = c
+                } else {
+                    count = max(items.count, 1)
+                }
+                let addr = memory.allocateBlock(count: max(count, 1), elementSize: elemSize)
+                var nextIdx = 0
+                for it in items {
+                    if case .designatedInit(_, let idxExpr, let valExpr, _) = it, let idxExpr = idxExpr {
+                        let idxVal = Int(try await evaluate(idxExpr).asInt)
+                        var v = try await evaluate(valExpr)
+                        if elemType.isInteger {
+                            v = CValue.truncate(value: v.asInt, to: elemType)
+                        }
+                        memory.write(address: addr + idxVal * elemSize, value: v)
+                        nextIdx = idxVal + 1
+                    } else {
+                        var v = try await evaluate(it)
+                        if elemType.isInteger {
+                            v = CValue.truncate(value: v.asInt, to: elemType)
+                        }
+                        memory.write(address: addr + nextIdx * elemSize, value: v)
+                        nextIdx += 1
+                    }
+                }
+                return .pointer(addr)
+            }
             
         case .initializerList:
             return .int(0)
@@ -777,6 +942,9 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             if left.isDouble || right.isDouble {
                 return .double(left.asDouble + right.asDouble)
             }
+            if left.isUInt || right.isUInt {
+                return .uint(left.asUInt &+ right.asUInt)
+            }
             return .int(left.asInt + right.asInt)
             
         case .subtract:
@@ -798,11 +966,17 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             if left.isDouble || right.isDouble {
                 return .double(left.asDouble - right.asDouble)
             }
+            if left.isUInt || right.isUInt {
+                return .uint(left.asUInt &- right.asUInt)
+            }
             return .int(left.asInt - right.asInt)
             
         case .multiply:
             if left.isDouble || right.isDouble {
                 return .double(left.asDouble * right.asDouble)
+            }
+            if left.isUInt || right.isUInt {
+                return .uint(left.asUInt &* right.asUInt)
             }
             return .int(left.asInt * right.asInt)
             
@@ -811,10 +985,18 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                 if right.asDouble == 0 { throw CRuntimeError("Division by zero", location: location) }
                 return .double(left.asDouble / right.asDouble)
             }
+            if left.isUInt || right.isUInt {
+                if right.asUInt == 0 { throw CRuntimeError("Division by zero", location: location) }
+                return .uint(left.asUInt / right.asUInt)
+            }
             if right.asInt == 0 { throw CRuntimeError("Division by zero", location: location) }
             return .int(left.asInt / right.asInt)
             
         case .modulo:
+            if left.isUInt || right.isUInt {
+                if right.asUInt == 0 { throw CRuntimeError("Modulo by zero", location: location) }
+                return .uint(left.asUInt % right.asUInt)
+            }
             if right.asInt == 0 { throw CRuntimeError("Modulo by zero", location: location) }
             return .int(left.asInt % right.asInt)
             
@@ -831,6 +1013,9 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             if left.isDouble || right.isDouble {
                 return .bool(left.asDouble == right.asDouble)
             }
+            if left.isUInt || right.isUInt {
+                return .bool(left.asUInt == right.asUInt)
+            }
             return .bool(left.asInt == right.asInt)
             
         case .notEqual:
@@ -846,11 +1031,17 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             if left.isDouble || right.isDouble {
                 return .bool(left.asDouble != right.asDouble)
             }
+            if left.isUInt || right.isUInt {
+                return .bool(left.asUInt != right.asUInt)
+            }
             return .bool(left.asInt != right.asInt)
             
         case .less:
             if left.isDouble || right.isDouble {
                 return .bool(left.asDouble < right.asDouble)
+            }
+            if left.isUInt || right.isUInt {
+                return .bool(left.asUInt < right.asUInt)
             }
             return .bool(left.asInt < right.asInt)
             
@@ -858,11 +1049,17 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             if left.isDouble || right.isDouble {
                 return .bool(left.asDouble <= right.asDouble)
             }
+            if left.isUInt || right.isUInt {
+                return .bool(left.asUInt <= right.asUInt)
+            }
             return .bool(left.asInt <= right.asInt)
             
         case .greater:
             if left.isDouble || right.isDouble {
                 return .bool(left.asDouble > right.asDouble)
+            }
+            if left.isUInt || right.isUInt {
+                return .bool(left.asUInt > right.asUInt)
             }
             return .bool(left.asInt > right.asInt)
             
@@ -870,17 +1067,25 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             if left.isDouble || right.isDouble {
                 return .bool(left.asDouble >= right.asDouble)
             }
+            if left.isUInt || right.isUInt {
+                return .bool(left.asUInt >= right.asUInt)
+            }
             return .bool(left.asInt >= right.asInt)
             
         case .bitwiseAnd:
+            if left.isUInt || right.isUInt { return .uint(left.asUInt & right.asUInt) }
             return .int(left.asInt & right.asInt)
         case .bitwiseOr:
+            if left.isUInt || right.isUInt { return .uint(left.asUInt | right.asUInt) }
             return .int(left.asInt | right.asInt)
         case .bitwiseXor:
+            if left.isUInt || right.isUInt { return .uint(left.asUInt ^ right.asUInt) }
             return .int(left.asInt ^ right.asInt)
         case .leftShift:
+            if left.isUInt || right.isUInt { return .uint(left.asUInt << right.asUInt) }
             return .int(left.asInt << right.asInt)
         case .rightShift:
+            if left.isUInt || right.isUInt { return .uint(left.asUInt >> right.asUInt) }
             return .int(left.asInt >> right.asInt)
             
         case .logicalAnd, .logicalOr, .streamInsert, .streamExtract:
@@ -913,11 +1118,22 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             if case .smartPointer(let spId) = val, let sp = memory.getSmartPointer(id: spId) {
                 return memory.read(address: sp.innerAddr)
             }
+            if case .string(let fnName) = val, (functions[fnName] != nil || builtins[fnName] != nil) {
+                return val
+            }
             guard case .pointer(let addr) = val else {
                 throw CRuntimeError("Cannot dereference non-pointer value", location: location)
             }
             return memory.read(address: addr)
         case .addressOf:
+            if case .identifier(let name, let ns, _) = operand {
+                let lookupName = (ns != nil && ns != "std") ? "\(ns!)::\(name)" : name
+                if currentScope.resolveAddress(name: lookupName) == nil && currentScope.resolveAddress(name: name) == nil {
+                    if functions[lookupName] != nil || builtins[lookupName] != nil || functions[name] != nil || builtins[name] != nil {
+                        return .string(lookupName)
+                    }
+                }
+            }
             guard let addr = resolveLValueAddress(operand) else {
                 throw CRuntimeError("lvalue required as unary '&' operand", location: location)
             }
@@ -974,14 +1190,18 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             var objVal = try await evaluate(objExpr)
             if isArrow {
                 if case .pointer(let addr) = objVal {
-                    let memVal = memory.read(address: addr)
-                    if case .structInstance = memVal {
-                        objVal = memVal
+                    if let sid = memory.addressToStructId[addr] {
+                        objVal = .structInstance(sid)
                     } else {
-                        for layout in memory.structLayouts.values {
-                            if let m = layout.memberMap[member] {
-                                memory.write(address: addr + m.offset, value: value)
-                                return value
+                        let memVal = memory.read(address: addr)
+                        if case .structInstance = memVal {
+                            objVal = memVal
+                        } else {
+                            for layout in memory.structLayouts.values {
+                                if let m = layout.memberMap[member] {
+                                    memory.write(address: addr + m.offset, value: value)
+                                    return value
+                                }
                             }
                         }
                     }
@@ -998,7 +1218,12 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             let base = try await evaluate(arrExpr)
             if case .pointer(let addr) = base {
                 let idx = try await evaluate(idxExpr).asInt
-                let pointeeSize = memory.pointerPointeeSizes[addr] ?? 8
+                var pointeeSize = memory.pointerPointeeSizes[addr] ?? 1
+                if case .identifier(let arrName, _, _) = arrExpr,
+                   let arrType = currentScope.resolveType(name: arrName),
+                   let elemType = arrType.pointeeType {
+                    pointeeSize = elemType.abiSize
+                }
                 memory.write(address: addr + Int(idx) * pointeeSize, value: value)
                 return value
             } else if case .vectorInstance(let vid) = base {
@@ -1150,26 +1375,45 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             }
         }
         
-        // Closure variable call e.g. multiplier(5) or add(10, 20)
-        if case .identifier(let name, _, _) = callee {
-            if let addr = currentScope.resolveAddress(name: name) {
+        // Closure variable call e.g. multiplier(5) or add(10, 20), or function pointer call
+        var targetCallableName: String? = nil
+        
+        if case .identifier(let name, let ns, _) = callee {
+            let directLookup = (ns != nil && ns != "std") ? "\(ns!)::\(name)" : name
+            if let addr = currentScope.resolveAddress(name: directLookup) ?? currentScope.resolveAddress(name: name) {
                 let val = memory.read(address: addr)
                 if case .closure(let cid) = val {
                     return try await executeClosure(cid: cid, args: args, location: location)
+                } else if case .string(let fnName) = val, (functions[fnName] != nil || builtins[fnName] != nil) {
+                    targetCallableName = fnName
                 }
+            }
+            if targetCallableName == nil {
+                targetCallableName = directLookup
+            }
+        } else {
+            // General expression call: (*fp)(...), (fp)(...), (lambda)(...), arr[i](...), etc.
+            let calleeVal = try await evaluate(callee)
+            if case .closure(let cid) = calleeVal {
+                return try await executeClosure(cid: cid, args: args, location: location)
+            } else if case .string(let fnName) = calleeVal, (functions[fnName] != nil || builtins[fnName] != nil) {
+                targetCallableName = fnName
+            } else if case .pointer(let addr) = calleeVal {
+                let memVal = memory.read(address: addr)
+                if case .closure(let cid) = memVal {
+                    return try await executeClosure(cid: cid, args: args, location: location)
+                } else if case .string(let fnName) = memVal, (functions[fnName] != nil || builtins[fnName] != nil) {
+                    targetCallableName = fnName
+                } else {
+                    throw CRuntimeError("Expression is not callable", location: location)
+                }
+            } else {
+                throw CRuntimeError("Expression is not callable", location: location)
             }
         }
         
-        // Identifier call
-        guard case .identifier(let name, let ns, _) = callee else {
+        guard let lookupName = targetCallableName else {
             throw CRuntimeError("Expression is not callable", location: location)
-        }
-        
-        let lookupName: String
-        if let ns = ns {
-            lookupName = (ns == "std") ? name : "\(ns)::\(name)"
-        } else {
-            lookupName = name
         }
         
         // C++ Algorithms & Memory Builtins
@@ -1250,14 +1494,26 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             return .smartPointer(spId)
         }
         
+        if lookupName == "string" {
+            if let first = args.first {
+                if case .string(let s) = first {
+                    return .string(s)
+                }
+                if case .pointer(let addr) = first {
+                    return .string(memory.readCString(at: addr))
+                }
+            }
+            return .string("")
+        }
+        
         // Builtin call
-        if let builtin = builtins[lookupName] ?? builtins[name] {
+        if let builtin = builtins[lookupName] {
             checkHeaderInclusionForBuiltin(name: lookupName, location: location)
             return try await builtin(args)
         }
         
         // User function call
-        guard let funcDef = functions[lookupName] ?? functions[name] else {
+        guard let funcDef = functions[lookupName] else {
             let errorMsg = undeclaredFunctionError(name: lookupName, location: location)
             throw CRuntimeError(errorMsg, location: location)
         }
@@ -1267,6 +1523,8 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         }
         
         let funcScope = Scope(parent: globalScope)
+        let funcNameAddr = memory.allocateCString(lookupName)
+        funcScope.define(name: "__func__", address: funcNameAddr, type: .pointer(.char))
         
         for (i, param) in funcDef.params.enumerated() {
             if param.isRef {

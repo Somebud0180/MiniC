@@ -84,14 +84,36 @@ public final class CParser {
                 continue
             }
             
-            // Check for struct declaration
-            if check(.kwStruct) || check(.kwClass) {
+            // Check for struct, union, or enum declaration
+            if check(.kwStruct) || check(.kwClass) || check(.kwUnion) || check(.kwEnum) {
                 let startLoc = peek().location
-                _ = (advance().type == .kwClass)
+                let isUnion = check(.kwUnion)
+                let isEnum = check(.kwEnum)
+                advance()
                 if case .identifier(let name) = peek().type {
                     advance()
                     if check(.leftBrace) {
-                        let stmt = try parseStructBody(name: name, location: startLoc)
+                        if isEnum {
+                            advance() // {
+                            var enumVal: Int64 = 0
+                            while !check(.rightBrace) && !isAtEnd {
+                                guard case .identifier(let enumName) = advance().type else { break }
+                                if match(.equal) {
+                                    if case .integerLiteral(let v) = peek().type {
+                                        advance()
+                                        enumVal = v
+                                    }
+                                }
+                                extraTopDeclarations.append(.variableDecl(type: .int, name: enumName, sizeExpr: nil, initExpr: .literalInt(enumVal, startLoc), isConst: true, startLoc))
+                                enumVal += 1
+                                if match(.comma) { continue }
+                                break
+                            }
+                            try consume(.rightBrace, message: "Expected '}' after enum body")
+                            _ = match(.semicolon)
+                            continue
+                        }
+                        let stmt = try parseStructBody(name: name, isUnion: isUnion, location: startLoc)
                         declarations.append(stmt)
                         continue
                     } else if match(.semicolon) {
@@ -99,7 +121,7 @@ public final class CParser {
                         continue
                     } else {
                         // It's a variable declaration with `struct Name var;`
-                        let baseType = CType.structType(name)
+                        let baseType = isUnion ? CType.unionType(name) : (isEnum ? CType.int : CType.structType(name))
                         let varDecl = try parseVariableDeclarationTail(baseType: baseType, isConst: false, location: startLoc)
                         declarations.append(varDecl)
                         continue
@@ -169,7 +191,7 @@ public final class CParser {
     
     // MARK: - Struct / Class
     
-    private func parseStructBody(name: String, location: SourceLocation) throws -> CStmt {
+    private func parseStructBody(name: String, isUnion: Bool = false, location: SourceLocation) throws -> CStmt {
         try consume(.leftBrace, message: "Expected '{' to start struct body")
         structNames.insert(name)
         
@@ -281,7 +303,7 @@ public final class CParser {
         }
         
         try consume(.semicolon, message: "Expected ';' after struct definition")
-        return .structDecl(name: name, fields: fields, location: location)
+        return .structDecl(name: name, fields: fields, isUnion: isUnion, location: location)
     }
     
     // MARK: - Types
@@ -294,14 +316,20 @@ public final class CParser {
         case .kwInt, .kwFloat, .kwDouble, .kwChar, .kwVoid, .kwBool,
              .kwLong, .kwShort, .kwUnsigned, .kwSigned, .kwConst,
              .kwVolatile, .kwStatic, .kwInline, .kwExtern, .kwConstexpr,
-             .kwStruct, .kwClass, .kwAuto:
+             .kwStruct, .kwClass, .kwUnion, .kwEnum, .kwRestrict, .kwAuto:
             return true
         case .identifier(let name):
-            if ["string", "vector", "map", "unique_ptr", "shared_ptr", "function"].contains(name) { return true }
+            let stdIntTypes: Set<String> = [
+                "int8_t", "uint8_t", "int16_t", "uint16_t",
+                "int32_t", "uint32_t", "int64_t", "uint64_t",
+                "size_t", "ssize_t", "uintptr_t", "intptr_t",
+                "ptrdiff_t", "intmax_t", "uintmax_t", "wchar_t", "wint_t", "va_list"
+            ]
+            if ["string", "vector", "map", "unique_ptr", "shared_ptr", "function"].contains(name) || stdIntTypes.contains(name) { return true }
             if name == "std" {
                 if i + 2 < tokens.count && tokens[i + 1].type == .colonColon {
                     if case .identifier(let sub) = tokens[i + 2].type {
-                        if ["string", "vector", "map", "unique_ptr", "shared_ptr", "function"].contains(sub) { return true }
+                        if ["string", "vector", "map", "unique_ptr", "shared_ptr", "function"].contains(sub) || stdIntTypes.contains(sub) { return true }
                         if typedefs.contains(sub) || structNames.contains(sub) { return true }
                     }
                 }
@@ -311,7 +339,6 @@ public final class CParser {
             if i + 1 < tokens.count {
                 let next = tokens[i + 1].type
                 if case .identifier = next { return true }
-                if next == .star || next == .ampersand || next == .logicalAnd { return true }
             }
             return false
         default:
@@ -320,7 +347,7 @@ public final class CParser {
     }
     
     private func parseType() throws -> CType {
-        while match(.kwStatic) || match(.kwInline) || match(.kwExtern) || match(.kwConstexpr) || match(.kwVolatile) || match(.kwConst) {}
+        while match(.kwStatic) || match(.kwInline) || match(.kwExtern) || match(.kwConstexpr) || match(.kwVolatile) || match(.kwConst) || match(.kwRestrict) {}
         
         let isUnsigned = match(.kwUnsigned)
         let isSigned = match(.kwSigned)
@@ -366,6 +393,16 @@ public final class CParser {
                     throw CCompilerError("Expected struct name", location: token.location)
                 }
                 baseType = .structType(name)
+            case .kwUnion:
+                guard case .identifier(let name) = advance().type else {
+                    throw CCompilerError("Expected union name", location: token.location)
+                }
+                baseType = .unionType(name)
+            case .kwEnum:
+                guard case .identifier = advance().type else {
+                    throw CCompilerError("Expected enum name", location: token.location)
+                }
+                baseType = .int
             case .identifier(let name):
                 if name == "std" && match(.colonColon) {
                     guard case .identifier(let stdSub) = advance().type else {
@@ -381,6 +418,26 @@ public final class CParser {
                         baseType = try parseSmartPointerType(kind: stdSub)
                     } else if stdSub == "function" {
                         baseType = try parseFunctionType()
+                    } else if stdSub == "size_t" || stdSub == "uintptr_t" {
+                        baseType = .unsignedLong
+                    } else if stdSub == "ssize_t" || stdSub == "intptr_t" {
+                        baseType = .long
+                    } else if stdSub == "int8_t" {
+                        baseType = .signedChar
+                    } else if stdSub == "uint8_t" {
+                        baseType = .unsignedChar
+                    } else if stdSub == "int16_t" {
+                        baseType = .short
+                    } else if stdSub == "uint16_t" {
+                        baseType = .unsignedShort
+                    } else if stdSub == "int32_t" {
+                        baseType = .int
+                    } else if stdSub == "uint32_t" {
+                        baseType = .unsignedInt
+                    } else if stdSub == "int64_t" {
+                        baseType = .longLong
+                    } else if stdSub == "uint64_t" {
+                        baseType = .unsignedLongLong
                     } else if ["cout", "cin", "endl", "cerr"].contains(stdSub) {
                         throw CCompilerError("'std::\(stdSub)' is not a type", location: token.location)
                     } else {
@@ -397,6 +454,32 @@ public final class CParser {
                     baseType = try parseSmartPointerType(kind: name)
                 } else if name == "function" {
                     baseType = try parseFunctionType()
+                } else if name == "size_t" || name == "uintptr_t" {
+                    baseType = .unsignedLong
+                } else if name == "ssize_t" || name == "intptr_t" || name == "ptrdiff_t" || name == "intmax_t" {
+                    baseType = .long
+                } else if name == "uintmax_t" {
+                    baseType = .unsignedLong
+                } else if name == "wchar_t" || name == "wint_t" {
+                    baseType = .int
+                } else if name == "va_list" {
+                    baseType = .pointer(.void)
+                } else if name == "int8_t" {
+                    baseType = .signedChar
+                } else if name == "uint8_t" {
+                    baseType = .unsignedChar
+                } else if name == "int16_t" {
+                    baseType = .short
+                } else if name == "uint16_t" {
+                    baseType = .unsignedShort
+                } else if name == "int32_t" {
+                    baseType = .int
+                } else if name == "uint32_t" {
+                    baseType = .unsignedInt
+                } else if name == "int64_t" {
+                    baseType = .longLong
+                } else if name == "uint64_t" {
+                    baseType = .unsignedLongLong
                 } else if structNames.contains(name) {
                     baseType = .structType(name)
                 } else {
@@ -415,10 +498,38 @@ public final class CParser {
                 baseType = .rvalueReference(baseType)
             } else if match(.ampersand) {
                 baseType = .reference(baseType)
-            } else if match(.kwConst) {
+            } else if match(.kwConst) || match(.kwVolatile) || match(.kwRestrict) {
                 continue
             } else {
                 break
+            }
+        }
+        
+        // Abstract declarator for function pointers or array pointers in casts: (*)(...) or (*)[...]
+        if check(.leftParen) {
+            let nextIdx = current + 1
+            if nextIdx < tokens.count && (tokens[nextIdx].type == .star || tokens[nextIdx].type == .rightParen) {
+                advance() // (
+                var isPtr = false
+                while match(.star) || match(.kwConst) || match(.kwVolatile) || match(.kwRestrict) {
+                    isPtr = true
+                }
+                if match(.rightParen) {
+                    if match(.leftParen) {
+                        var depth = 1
+                        while depth > 0 && !isAtEnd {
+                            if match(.leftParen) { depth += 1 }
+                            else if match(.rightParen) { depth -= 1 }
+                            else { advance() }
+                        }
+                    } else if match(.leftBracket) {
+                        while !check(.rightBracket) && !isAtEnd { advance() }
+                        _ = match(.rightBracket)
+                    }
+                    if isPtr {
+                        baseType = .pointer(baseType)
+                    }
+                }
             }
         }
         
@@ -525,7 +636,40 @@ public final class CParser {
         }
         
         try consume(.semicolon, message: "Expected ';' after variable declaration")
-        return .variableDecl(type: finalType, name: name, initExpr: initExpr, isConst: isConst, loc)
+        return .variableDecl(type: finalType, name: name, sizeExpr: nil, initExpr: initExpr, isConst: isConst, loc)
+    }
+    
+    private func parseMemberVariableDeclaration(baseType: CType, isConst: Bool, loc: SourceLocation) throws -> CStmt {
+        var finalType = baseType
+        while match(.star) {
+            finalType = .pointer(finalType)
+        }
+        
+        guard case .identifier(let name) = advance().type else {
+            throw CCompilerError("Expected identifier in variable declaration", location: loc)
+        }
+        
+        if match(.leftBracket) {
+            var size: Int? = nil
+            if case .integerLiteral(let s) = peek().type {
+                advance()
+                size = Int(s)
+            }
+            try consume(.rightBracket, message: "Expected ']' in array declaration")
+            finalType = .array(finalType, size)
+        }
+        
+        var initExpr: CExpr? = nil
+        if match(.equal) {
+            if check(.leftBrace) {
+                initExpr = try parseInitializerList()
+            } else {
+                initExpr = try parseExpression()
+            }
+        }
+        
+        try consume(.semicolon, message: "Expected ';' after variable declaration")
+        return .variableDecl(type: finalType, name: name, sizeExpr: nil, initExpr: initExpr, isConst: isConst, loc)
     }
     
     private func parseFunctionDeclaration(returnType: CType, name: String, location: SourceLocation) throws -> CStmt {
@@ -534,6 +678,9 @@ public final class CParser {
         if !check(.rightParen) {
             while true {
                 if match(.kwVoid) && check(.rightParen) {
+                    break
+                }
+                if match(.ellipsis) {
                     break
                 }
                 
@@ -552,14 +699,21 @@ public final class CParser {
                 
                 // Array parameter decays to pointer
                 if match(.leftBracket) {
-                    _ = match(.integerLiteral(0))
+                    if !check(.rightBracket) {
+                        _ = try parseExpression()
+                    }
                     try consume(.rightBracket, message: "Expected ']' in array parameter")
                     pType = .pointer(pType)
                 }
                 
                 params.append((type: pType, name: pName, isRef: isRef))
                 
-                if match(.comma) { continue }
+                if match(.comma) {
+                    if match(.ellipsis) {
+                        break
+                    }
+                    continue
+                }
                 break
             }
         }
@@ -674,13 +828,22 @@ public final class CParser {
             
             // Check array
             var arraySize: Int? = nil
-            if match(.leftBracket) {
-                if case .integerLiteral(let s) = peek().type {
-                    advance()
-                    arraySize = Int(s)
+            var vlaSizeExpr: CExpr? = nil
+            var hasArrayBrackets = false
+            while match(.leftBracket) {
+                hasArrayBrackets = true
+                var dimSize: Int? = nil
+                if !check(.rightBracket) {
+                    let szExpr = try parseExpression()
+                    if case .literalInt(let s, _) = szExpr {
+                        dimSize = Int(s)
+                    } else {
+                        vlaSizeExpr = szExpr
+                    }
                 }
                 try consume(.rightBracket, message: "Expected ']' in array declaration")
-                varType = .array(varType, arraySize)
+                arraySize = dimSize
+                varType = .array(varType, dimSize)
             }
             
             var initExpr: CExpr? = nil
@@ -688,7 +851,7 @@ public final class CParser {
                 if check(.leftBrace) {
                     let initList = try parseInitializerList()
                     initExpr = initList
-                    if case .initializerList(let items, _) = initList, arraySize == nil {
+                    if case .initializerList(let items, _) = initList, hasArrayBrackets && arraySize == nil {
                         varType = .array(baseType, items.count)
                     }
                 } else {
@@ -701,7 +864,7 @@ public final class CParser {
                 initExpr = arg
             }
             
-            statements.append(.variableDecl(type: varType, name: name, initExpr: initExpr, isConst: isConst, location))
+            statements.append(.variableDecl(type: varType, name: name, sizeExpr: vlaSizeExpr, initExpr: initExpr, isConst: isConst, location))
             
             if match(.comma) { continue }
             break
@@ -721,7 +884,20 @@ public final class CParser {
         
         if !check(.rightBrace) {
             while true {
-                if check(.leftBrace) {
+                if match(.dot) {
+                    guard case .identifier(let fName) = advance().type else {
+                        throw CCompilerError("Expected field name in designated initializer", location: loc)
+                    }
+                    try consume(.equal, message: "Expected '=' in designated initializer")
+                    let val = check(.leftBrace) ? try parseInitializerList() : try parseExpression()
+                    items.append(.designatedInit(field: fName, indexExpr: nil, value: val, loc))
+                } else if match(.leftBracket) {
+                    let idxExpr = try parseExpression()
+                    try consume(.rightBracket, message: "Expected ']' in array designated initializer")
+                    try consume(.equal, message: "Expected '=' in designated initializer")
+                    let val = check(.leftBrace) ? try parseInitializerList() : try parseExpression()
+                    items.append(.designatedInit(field: nil, indexExpr: idxExpr, value: val, loc))
+                } else if check(.leftBrace) {
                     items.append(try parseInitializerList())
                 } else {
                     items.append(try parseExpression())
@@ -1059,6 +1235,74 @@ public final class CParser {
         return expr
     }
     
+    private func isTypeCastLookahead() -> Bool {
+        guard check(.leftParen) else { return false }
+        let nextIndex = current + 1
+        guard nextIndex < tokens.count else { return false }
+        
+        guard isTypeBeginning(at: nextIndex) else { return false }
+        
+        var idx = nextIndex
+        var parenDepth = 1
+        var sawTypeName = false
+        
+        while idx < tokens.count && parenDepth > 0 {
+            let tok = tokens[idx]
+            switch tok.type {
+            case .leftParen:
+                parenDepth += 1
+            case .rightParen:
+                parenDepth -= 1
+                if parenDepth == 0 {
+                    let afterIdx = idx + 1
+                    if afterIdx < tokens.count {
+                        let afterTok = tokens[afterIdx]
+                        switch afterTok.type {
+                        case .semicolon, .comma, .rightParen, .rightBracket, .rightBrace:
+                            return false
+                        case .equal, .plusEqual, .minusEqual, .starEqual, .slashEqual:
+                            return false
+                        case .question, .colon:
+                            return false
+                        case .logicalAnd, .logicalOr:
+                            return false
+                        default:
+                            break
+                        }
+                    }
+                    return sawTypeName
+                }
+            case .kwInt, .kwFloat, .kwDouble, .kwChar, .kwVoid, .kwBool,
+                 .kwLong, .kwShort, .kwSigned, .kwUnsigned,
+                 .kwStruct, .kwClass, .kwUnion, .kwEnum,
+                 .kwConst, .kwVolatile, .kwRestrict, .kwAuto:
+                sawTypeName = true
+            case .star, .ampersand, .leftBracket, .rightBracket, .colonColon:
+                break
+            case .integerLiteral:
+                break
+            case .identifier(let name):
+                let stdIntTypes: Set<String> = [
+                    "int8_t", "uint8_t", "int16_t", "uint16_t",
+                    "int32_t", "uint32_t", "int64_t", "uint64_t",
+                    "size_t", "ssize_t", "uintptr_t", "intptr_t",
+                    "ptrdiff_t", "intmax_t", "uintmax_t", "wchar_t", "wint_t", "va_list",
+                    "string", "vector", "map", "unique_ptr", "shared_ptr", "function"
+                ]
+                if name == "std" || stdIntTypes.contains(name) || typedefs.contains(name) || structNames.contains(name) {
+                    sawTypeName = true
+                } else {
+                    return false
+                }
+            default:
+                return false
+            }
+            idx += 1
+        }
+        
+        return false
+    }
+    
     private func parseUnary() throws -> CExpr {
         let loc = peek().location
         
@@ -1097,7 +1341,25 @@ public final class CParser {
         if match(.kwSizeof) {
             if match(.leftParen) {
                 if isTypeBeginning() {
-                    let type = try parseType()
+                    var type = try parseType()
+                    while match(.leftBracket) {
+                        var sz: Int? = nil
+                        if !check(.rightBracket) {
+                            if case .integerLiteral(let s) = peek().type {
+                                advance()
+                                sz = Int(s)
+                            } else {
+                                var bracketDepth = 1
+                                while bracketDepth > 0 && !isAtEnd {
+                                    if check(.leftBracket) { bracketDepth += 1; advance() }
+                                    else if check(.rightBracket) { bracketDepth -= 1; if bracketDepth > 0 { advance() } }
+                                    else { advance() }
+                                }
+                            }
+                        }
+                        try consume(.rightBracket, message: "Expected ']' in sizeof array type")
+                        type = .array(type, sz)
+                    }
                     try consume(.rightParen, message: "Expected ')' after sizeof type")
                     return .sizeofType(type, loc)
                 } else {
@@ -1111,19 +1373,36 @@ public final class CParser {
             }
         }
         
-        // Type cast: (type)expr
-        if check(.leftParen) {
-            let nextIndex = current + 1
-            if nextIndex < tokens.count {
-                let isType = isTypeBeginning(at: nextIndex)
-                if isType {
-                    advance() // (
-                    let castType = try parseType()
-                    try consume(.rightParen, message: "Expected ')' in type cast")
-                    let operand = try parseUnary()
-                    return .cast(castType, operand, loc)
+        // Type cast or Compound literal: (type)expr or (type){ ... }
+        if check(.leftParen) && isTypeCastLookahead() {
+            advance() // (
+            var castType = try parseType()
+            while match(.leftBracket) {
+                var sz: Int? = nil
+                if !check(.rightBracket) {
+                    if case .integerLiteral(let s) = peek().type {
+                        advance()
+                        sz = Int(s)
+                    } else {
+                        var bracketDepth = 1
+                        while bracketDepth > 0 && !isAtEnd {
+                            if check(.leftBracket) { bracketDepth += 1; advance() }
+                            else if check(.rightBracket) { bracketDepth -= 1; if bracketDepth > 0 { advance() } }
+                            else { advance() }
+                        }
+                    }
                 }
+                try consume(.rightBracket, message: "Expected ']' in compound literal array type")
+                castType = .array(castType, sz)
             }
+            while match(.kwConst) || match(.kwVolatile) || match(.kwRestrict) {}
+            try consume(.rightParen, message: "Expected ')' in type cast")
+            if check(.leftBrace) {
+                let initList = try parseInitializerList()
+                return .compoundLiteral(castType, initList, loc)
+            }
+            let operand = try parseUnary()
+            return .cast(castType, operand, loc)
         }
         
         return try parsePostfix()

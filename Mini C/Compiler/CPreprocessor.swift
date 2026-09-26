@@ -122,8 +122,11 @@ public final class CPreprocessor {
                 
                 if directive.hasPrefix("include") {
                     let includePart = directive.dropFirst(7).trimmingCharacters(in: .whitespaces)
-                    processInclude(includePart, lineNum: lineNum, fileName: fileName)
-                    processedLines.append("")
+                    if let userLines = processInclude(includePart, lineNum: lineNum, fileName: fileName) {
+                        processedLines.append(contentsOf: userLines)
+                    } else {
+                        processedLines.append("")
+                    }
                     continue
                 } else if directive.hasPrefix("define ") {
                     let rest = directive.dropFirst(7).trimmingCharacters(in: .whitespaces)
@@ -643,7 +646,7 @@ public final class CPreprocessor {
     
     // MARK: - Header & Include Processing
     
-    private func processInclude(_ rawInclude: String, lineNum: Int, fileName: String) {
+    private func processInclude(_ rawInclude: String, lineNum: Int, fileName: String) -> [String]? {
         var header = rawInclude.trimmingCharacters(in: .whitespaces)
         let isSystem = header.hasPrefix("<") && header.hasSuffix(">")
         let isUser = header.hasPrefix("\"") && header.hasSuffix("\"")
@@ -659,16 +662,27 @@ public final class CPreprocessor {
                 let candidateURL = fileDirectory.appendingPathComponent(header)
                 if FileManager.default.fileExists(atPath: candidateURL.path) {
                     includedHeaders.insert(header)
-                    return
+                    if let content = try? String(contentsOf: candidateURL, encoding: .utf8) {
+                        let subPreprocessor = CPreprocessor(fileDirectory: fileDirectory)
+                        subPreprocessor.macros = self.macros
+                        let subResult = subPreprocessor.process(source: content, fileName: header)
+                        self.diagnostics.append(contentsOf: subPreprocessor.diagnostics)
+                        self.includedHeaders.formUnion(subPreprocessor.includedHeaders)
+                        for (k, v) in subPreprocessor.macros {
+                            self.macros[k] = v
+                        }
+                        return subResult.components(separatedBy: "\n")
+                    }
+                    return nil
                 }
             }
             if isSupportedStandardHeader(header) {
                 includedHeaders.insert(header)
                 defineHeaderMacros(header)
-                return
+                return nil
             }
             diagnostics.append("\(filePrefix)warning: header '\(header)' not found; skipping include.\n")
-            return
+            return nil
         }
         
         if isSupportedStandardHeader(header) {
@@ -679,6 +693,7 @@ public final class CPreprocessor {
         } else {
             diagnostics.append("\(filePrefix)warning: header <\(header)> not found or unsupported in Mini C runtime.\n")
         }
+        return nil
     }
     
     private func isSupportedStandardHeader(_ name: String) -> Bool {
@@ -739,6 +754,23 @@ public final class CPreprocessor {
     
     private func defineHeaderMacros(_ header: String) {
         switch header {
+        case "stdbool.h":
+            macros["bool"] = Macro(name: "bool", parameters: nil, replacement: "_Bool")
+            macros["true"] = Macro(name: "true", parameters: nil, replacement: "1")
+            macros["false"] = Macro(name: "false", parameters: nil, replacement: "0")
+            macros["__bool_true_false_are_defined"] = Macro(name: "__bool_true_false_are_defined", parameters: nil, replacement: "1")
+        case "stdint.h", "cstdint":
+            macros["INT8_MAX"] = Macro(name: "INT8_MAX", parameters: nil, replacement: "127")
+            macros["INT8_MIN"] = Macro(name: "INT8_MIN", parameters: nil, replacement: "-128")
+            macros["UINT8_MAX"] = Macro(name: "UINT8_MAX", parameters: nil, replacement: "255")
+            macros["INT16_MAX"] = Macro(name: "INT16_MAX", parameters: nil, replacement: "32767")
+            macros["INT16_MIN"] = Macro(name: "INT16_MIN", parameters: nil, replacement: "-32768")
+            macros["UINT16_MAX"] = Macro(name: "UINT16_MAX", parameters: nil, replacement: "65535")
+            macros["INT32_MAX"] = Macro(name: "INT32_MAX", parameters: nil, replacement: "2147483647")
+            macros["INT32_MIN"] = Macro(name: "INT32_MIN", parameters: nil, replacement: "-2147483648")
+            macros["UINT32_MAX"] = Macro(name: "UINT32_MAX", parameters: nil, replacement: "4294967295U")
+            macros["INT64_MAX"] = Macro(name: "INT64_MAX", parameters: nil, replacement: "9223372036854775807LL")
+            macros["UINT64_MAX"] = Macro(name: "UINT64_MAX", parameters: nil, replacement: "18446744073709551615ULL")
         case "unistd.h", "unistd":
             macros["STDIN_FILENO"] = Macro(name: "STDIN_FILENO", parameters: nil, replacement: "0")
             macros["STDOUT_FILENO"] = Macro(name: "STDOUT_FILENO", parameters: nil, replacement: "1")

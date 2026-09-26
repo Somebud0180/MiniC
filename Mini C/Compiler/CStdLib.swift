@@ -85,7 +85,7 @@ public final class CStdLib {
         // MARK: - stdlib: malloc & free
         builtins["malloc"] = { args in
             let size = Int(args.first?.asInt ?? 0)
-            let addr = runtimeIO.memory.allocateBlock(count: max(size, 1))
+            let addr = runtimeIO.memory.allocateBlock(count: max(size, 1), elementSize: 1)
             return .pointer(addr)
         }
         
@@ -317,7 +317,7 @@ public final class CStdLib {
             formatter.dateFormat = "EEE MMM dd HH:mm:ss yyyy\n"
             formatter.locale = Locale(identifier: "en_US_POSIX")
             let dateStr = formatter.string(from: date)
-            let addr = runtimeIO.memory.allocateBlock(count: dateStr.utf8.count + 1)
+            let addr = runtimeIO.memory.allocateBlock(count: dateStr.utf8.count + 1, elementSize: 1)
             runtimeIO.memory.writeCString(dateStr, to: addr)
             return .pointer(addr)
         }
@@ -371,7 +371,7 @@ public final class CStdLib {
                 runtimeIO.memory.writeCString(truncated, to: addr)
                 return .pointer(addr)
             } else {
-                let addr = runtimeIO.memory.allocateBlock(count: cwd.utf8.count + 1)
+                let addr = runtimeIO.memory.allocateBlock(count: cwd.utf8.count + 1, elementSize: 1)
                 runtimeIO.memory.writeCString(cwd, to: addr)
                 return .pointer(addr)
             }
@@ -443,15 +443,15 @@ public final class CStdLib {
             let num = Int(args.first?.asInt ?? 0)
             let size = args.count > 1 ? Int(args[1].asInt) : 1
             let total = max(num * size, 1)
-            let addr = runtimeIO.memory.allocateBlock(count: total, defaultValue: .int(0))
+            let addr = runtimeIO.memory.allocateBlock(count: total, elementSize: 1)
             return .pointer(addr)
         }
         builtins["realloc"] = { args in
             let newSize = args.count > 1 ? Int(args[1].asInt) : 0
-            let newAddr = runtimeIO.memory.allocateBlock(count: max(newSize, 1))
+            let newAddr = runtimeIO.memory.allocateBlock(count: max(newSize, 1), elementSize: 1)
             if let first = args.first, case .pointer(let oldAddr) = first, oldAddr != 0 {
                 for i in 0..<max(newSize, 1) {
-                    runtimeIO.memory.write(address: newAddr + i * 8, value: runtimeIO.memory.read(address: oldAddr + i * 8))
+                    runtimeIO.memory.write(address: newAddr + i, value: runtimeIO.memory.read(address: oldAddr + i))
                 }
             }
             return .pointer(newAddr)
@@ -460,7 +460,7 @@ public final class CStdLib {
             guard let first = args.first else { return .null }
             let key = casePointer(first, memory: runtimeIO.memory)
             if let val = ProcessInfo.processInfo.environment[key] {
-                let addr = runtimeIO.memory.allocateBlock(count: val.utf8.count + 1)
+                let addr = runtimeIO.memory.allocateBlock(count: val.utf8.count + 1, elementSize: 1)
                 runtimeIO.memory.writeCString(val, to: addr)
                 return .pointer(addr)
             }
@@ -595,20 +595,39 @@ public final class CStdLib {
             return .pointer(addr)
         }
         builtins["memcpy"] = { args in
-            guard args.count >= 3, case .pointer(let dstAddr) = args[0], case .pointer(let srcAddr) = args[1] else { return args.first ?? .void }
+            guard args.count >= 3, case .pointer(let dstAddr) = args[0] else { return args.first ?? .void }
             let n = Int(args[2].asInt)
-            for i in 0..<n {
-                let v = runtimeIO.memory.read(address: srcAddr + i)
-                runtimeIO.memory.write(address: dstAddr + i, value: v)
+            if case .pointer(let srcAddr) = args[1] {
+                for i in 0..<n {
+                    let v = runtimeIO.memory.read(address: srcAddr + i)
+                    runtimeIO.memory.write(address: dstAddr + i, value: v)
+                }
+            } else if case .string(let str) = args[1] {
+                let bytes = Array(str.utf8)
+                for i in 0..<min(n, bytes.count) {
+                    runtimeIO.memory.write(address: dstAddr + i, value: .char(bytes[i]))
+                }
+                if bytes.count < n {
+                    runtimeIO.memory.write(address: dstAddr + bytes.count, value: .char(0))
+                }
             }
             return .pointer(dstAddr)
         }
         builtins["memcmp"] = { args in
-            guard args.count >= 3, case .pointer(let a1) = args[0], case .pointer(let a2) = args[1] else { return .int(0) }
+            guard args.count >= 3 else { return .int(0) }
             let n = Int(args[2].asInt)
+            let getByte: (CValue, Int) -> Int = { val, offset in
+                if case .pointer(let addr) = val {
+                    return Int(runtimeIO.memory.read(address: addr + offset).asInt & 0xFF)
+                } else if case .string(let s) = val {
+                    let bytes = Array(s.utf8)
+                    return offset < bytes.count ? Int(bytes[offset]) : 0
+                }
+                return 0
+            }
             for i in 0..<n {
-                let b1 = runtimeIO.memory.read(address: a1 + i).asInt
-                let b2 = runtimeIO.memory.read(address: a2 + i).asInt
+                let b1 = getByte(args[0], i)
+                let b2 = getByte(args[1], i)
                 if b1 != b2 { return .int(b1 < b2 ? -1 : 1) }
             }
             return .int(0)
@@ -639,49 +658,12 @@ public final class CStdLib {
         }
         builtins["isxdigit"] = { args in
             let c = UInt8(args.first?.asInt ?? 0 & 0xFF)
-            let isHex = (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102)
-            return .int(isHex ? 1 : 0)
+            let isX = (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102)
+            return .int(isX ? 1 : 0)
         }
         builtins["isascii"] = { args in
             let c = args.first?.asInt ?? 0
-            return .int(c >= 0 && c <= 127 ? 1 : 0)
-        }
-
-        // MARK: - assert
-        builtins["assert"] = { args in
-            guard let cond = args.first else { return .void }
-            if !cond.isTruthy {
-                throw CRuntimeError("Assertion failed")
-            }
-            return .void
-        }
-
-        // MARK: - math additions
-        builtins["asin"] = { args in .double(asin(args.first?.asDouble ?? 0.0)) }
-        builtins["acos"] = { args in .double(acos(args.first?.asDouble ?? 0.0)) }
-        builtins["atan"] = { args in .double(atan(args.first?.asDouble ?? 0.0)) }
-        builtins["atan2"] = { args in
-            let y = args.first?.asDouble ?? 0.0
-            let x = args.count > 1 ? args[1].asDouble : 0.0
-            return .double(atan2(y, x))
-        }
-        builtins["fmod"] = { args in
-            let x = args.first?.asDouble ?? 0.0
-            let y = args.count > 1 ? args[1].asDouble : 1.0
-            return .double(fmod(x, y))
-        }
-        builtins["cbrt"] = { args in .double(cbrt(args.first?.asDouble ?? 0.0)) }
-        builtins["log2"] = { args in .double(log2(args.first?.asDouble ?? 0.0)) }
-        builtins["exp2"] = { args in .double(exp2(args.first?.asDouble ?? 0.0)) }
-
-        // MARK: - algorithm: min, max, swap
-        builtins["max"] = { args in
-            guard args.count >= 2 else { return args.first ?? .int(0) }
-            return args[0].asDouble >= args[1].asDouble ? args[0] : args[1]
-        }
-        builtins["min"] = { args in
-            guard args.count >= 2 else { return args.first ?? .int(0) }
-            return args[0].asDouble <= args[1].asDouble ? args[0] : args[1]
+            return .int((c >= 0 && c <= 127) ? 1 : 0)
         }
     }
     
@@ -704,22 +686,17 @@ public final class CStdLib {
             let ch = format[i]
             if ch == "%" {
                 let nextIdx = format.index(after: i)
-                if nextIdx >= format.endIndex {
-                    output.append("%")
-                    break
-                }
-                
-                if format[nextIdx] == "%" {
+                if nextIdx < format.endIndex && format[nextIdx] == "%" {
                     output.append("%")
                     i = format.index(after: nextIdx)
                     continue
                 }
                 
-                // Parse format specifiers e.g. %5d, %.2f, %02d, %s, %c, %x, %ld
+                // Parse specifier
                 var specIndex = nextIdx
+                var isZeroPadded = false
                 var width: Int? = nil
                 var precision: Int? = nil
-                var isZeroPadded = false
                 
                 if specIndex < format.endIndex && format[specIndex] == "0" {
                     isZeroPadded = true
@@ -745,8 +722,8 @@ public final class CStdLib {
                     if let p = Int(precStr) { precision = p }
                 }
                 
-                // Length modifiers (l, ll, h)
-                while specIndex < format.endIndex && (format[specIndex] == "l" || format[specIndex] == "h") {
+                // Length modifiers (l, ll, h, hh, z)
+                while specIndex < format.endIndex && (format[specIndex] == "l" || format[specIndex] == "h" || format[specIndex] == "z") {
                     specIndex = format.index(after: specIndex)
                 }
                 
@@ -757,7 +734,16 @@ public final class CStdLib {
                     
                     var formattedArg = ""
                     switch specChar {
-                    case "d", "i", "u":
+                    case "u":
+                        let val = arg.asUInt
+                        if let w = width {
+                            let pad = isZeroPadded ? "0" : " "
+                            let raw = String(val)
+                            formattedArg = raw.count < w ? String(repeating: pad, count: w - raw.count) + raw : raw
+                        } else {
+                            formattedArg = String(val)
+                        }
+                    case "d", "i":
                         let val = arg.asInt
                         if let w = width {
                             let pad = isZeroPadded ? "0" : " "
@@ -768,8 +754,8 @@ public final class CStdLib {
                         }
                     case "f":
                         let val = arg.asDouble
-                        _ = precision ?? 6
-                        let raw = String(format: "%.\\(prec)f", val)
+                        let prec = precision ?? 6
+                        let raw = String(format: "%.\(prec)f", val)
                         if let w = width, raw.count < w {
                             let pad = isZeroPadded ? "0" : " "
                             formattedArg = String(repeating: pad, count: w - raw.count) + raw

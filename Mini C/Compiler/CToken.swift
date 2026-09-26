@@ -7,7 +7,7 @@ public enum CTokenType: Equatable, Sendable {
     case kwInt, kwFloat, kwDouble, kwChar, kwVoid, kwBool
     case kwLong, kwShort, kwUnsigned, kwSigned
     case kwConst, kwStatic, kwAuto, kwInline, kwExtern, kwVolatile, kwConstexpr
-    case kwStruct, kwClass, kwPublic, kwPrivate, kwTypedef
+    case kwStruct, kwClass, kwPublic, kwPrivate, kwTypedef, kwUnion, kwEnum, kwRestrict
     case kwIf, kwElse, kwWhile, kwFor, kwDo, kwReturn, kwBreak, kwContinue
     case kwSwitch, kwCase, kwDefault, kwSizeof, kwNew, kwDelete
     case kwUsing, kwNamespace, kwTrue, kwFalse, kwNull, kwNullptr
@@ -64,6 +64,7 @@ public enum CTokenType: Equatable, Sendable {
     case colonColon     // ::
     case dot            // .
     case arrow          // ->
+    case ellipsis       // ...
     
     // Delimiters
     case leftParen      // (
@@ -281,7 +282,13 @@ public final class CLexer {
                 }
                 
             case ".":
-                tokens.append(CToken(type: .dot, location: startLoc, raw: "."))
+                if currentChar == "." && peek() == "." {
+                    advance()
+                    advance()
+                    tokens.append(CToken(type: .ellipsis, location: startLoc, raw: "..."))
+                } else {
+                    tokens.append(CToken(type: .dot, location: startLoc, raw: "."))
+                }
                 
             case "\"":
                 let str = try scanStringLiteral()
@@ -399,12 +406,34 @@ public final class CLexer {
         
         if startChar == "0" && (currentChar == "x" || currentChar == "X") {
             raw.append(advance())
-            while let c = currentChar, c.isHexDigit {
-                raw.append(advance())
+            var isHexFloat = false
+            while let c = currentChar {
+                if c.isHexDigit {
+                    raw.append(advance())
+                } else if c == "." && !isHexFloat {
+                    isHexFloat = true
+                    raw.append(advance())
+                } else if c == "p" || c == "P" {
+                    isHexFloat = true
+                    raw.append(advance())
+                    if currentChar == "+" || currentChar == "-" {
+                        raw.append(advance())
+                    }
+                } else {
+                    break
+                }
             }
-            let clean = raw.dropFirst(2)
-            let val = Int64(clean, radix: 16) ?? 0
-            return CToken(type: .integerLiteral(val), location: startLoc, raw: raw)
+            while let c = currentChar, c == "f" || c == "F" || c == "l" || c == "L" || c == "u" || c == "U" {
+                advance()
+            }
+            if isHexFloat {
+                let val = strtod(raw, nil)
+                return CToken(type: .floatLiteral(val), location: startLoc, raw: raw)
+            } else {
+                let clean = raw.dropFirst(2)
+                let val = Int64(clean, radix: 16) ?? Int64(bitPattern: UInt64(clean, radix: 16) ?? 0)
+                return CToken(type: .integerLiteral(val), location: startLoc, raw: raw)
+            }
         }
         
         while let ch = currentChar {
@@ -430,7 +459,7 @@ public final class CLexer {
             let val = Double(raw) ?? 0.0
             return CToken(type: .floatLiteral(val), location: startLoc, raw: raw)
         } else {
-            let val = Int64(raw) ?? 0
+            let val = Int64(raw) ?? Int64(bitPattern: UInt64(raw) ?? 0)
             return CToken(type: .integerLiteral(val), location: startLoc, raw: raw)
         }
     }
@@ -448,7 +477,7 @@ public final class CLexer {
         case "double": type = .kwDouble
         case "char": type = .kwChar
         case "void": type = .kwVoid
-        case "bool": type = .kwBool
+        case "bool", "_Bool": type = .kwBool
         case "long": type = .kwLong
         case "short": type = .kwShort
         case "unsigned": type = .kwUnsigned
@@ -462,6 +491,9 @@ public final class CLexer {
         case "auto": type = .kwAuto
         case "struct": type = .kwStruct
         case "class": type = .kwClass
+        case "union": type = .kwUnion
+        case "enum": type = .kwEnum
+        case "restrict", "__restrict", "__restrict__": type = .kwRestrict
         case "public": type = .kwPublic
         case "private": type = .kwPrivate
         case "typedef": type = .kwTypedef

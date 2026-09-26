@@ -4,6 +4,7 @@ import Foundation
 
 public enum CValue: Equatable, Sendable, CustomStringConvertible {
     case int(Int64)
+    case uint(UInt64)
     case double(Double)
     case char(UInt8)
     case bool(Bool)
@@ -34,9 +35,15 @@ public enum CValue: Equatable, Sendable, CustomStringConvertible {
         return false
     }
     
+    public var isUInt: Bool {
+        if case .uint = self { return true }
+        return false
+    }
+    
     public var asInt: Int64 {
         switch self {
         case .int(let v): return v
+        case .uint(let v): return Int64(bitPattern: v)
         case .double(let v): return Int64(v)
         case .char(let v): return Int64(v)
         case .bool(let v): return v ? 1 : 0
@@ -49,12 +56,21 @@ public enum CValue: Equatable, Sendable, CustomStringConvertible {
     }
     
     public var asUInt: UInt64 {
-        return UInt64(bitPattern: asInt)
+        switch self {
+        case .uint(let v): return v
+        case .int(let v): return UInt64(bitPattern: v)
+        case .double(let v): return UInt64(v)
+        case .char(let v): return UInt64(v)
+        case .bool(let v): return v ? 1 : 0
+        case .pointer(let v): return UInt64(v)
+        default: return 0
+        }
     }
     
     public var asDouble: Double {
         switch self {
         case .int(let v): return Double(v)
+        case .uint(let v): return Double(v)
         case .double(let v): return v
         case .char(let v): return Double(v)
         case .bool(let v): return v ? 1.0 : 0.0
@@ -68,6 +84,7 @@ public enum CValue: Equatable, Sendable, CustomStringConvertible {
     public var isTruthy: Bool {
         switch self {
         case .int(let v): return v != 0
+        case .uint(let v): return v != 0
         case .double(let v): return v != 0.0
         case .char(let v): return v != 0
         case .bool(let v): return v
@@ -82,6 +99,7 @@ public enum CValue: Equatable, Sendable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .int(let v): return String(v)
+        case .uint(let v): return String(v)
         case .double(let v):
             if v.truncatingRemainder(dividingBy: 1.0) == 0 {
                 return String(format: "%.1f", v)
@@ -116,7 +134,13 @@ public enum CValue: Equatable, Sendable, CustomStringConvertible {
         case .int:
             return .int(Int64(Int32(truncatingIfNeeded: value)))
         case .unsignedInt:
-            return .int(Int64(UInt32(truncatingIfNeeded: value)))
+            return .uint(UInt64(UInt32(truncatingIfNeeded: value)))
+        case .long:
+            return .int(value)
+        case .unsignedLong, .unsignedLongLong:
+            return .uint(UInt64(bitPattern: value))
+        case .longLong:
+            return .int(value)
         case .bool:
             return .bool(value != 0)
         default:
@@ -133,7 +157,8 @@ public final class MemoryManager {
     
     public var structLayouts: [String: RecordLayout] = [:]
     private var structs: [Int: [String: CValue]] = [:]
-    private var structAddresses: [Int: Int] = [:]
+    public private(set) var structAddresses: [Int: Int] = [:]
+    public private(set) var addressToStructId: [Int: Int] = [:]
     private var addressToMember: [Int: (structId: Int, member: String)] = [:]
     private var nextStructId: Int = 1
     
@@ -170,6 +195,7 @@ public final class MemoryManager {
         nextAddress = 0x1000
         structs.removeAll()
         structAddresses.removeAll()
+        addressToStructId.removeAll()
         addressToMember.removeAll()
         nextStructId = 1
         vectors.removeAll()
@@ -194,49 +220,67 @@ public final class MemoryManager {
     public func allocate(value: CValue = .int(0), alignment: Int = 8, size: Int = 8) -> Int {
         alignNextAddress(to: alignment)
         let addr = nextAddress
-        nextAddress += max(size, 8)
+        nextAddress += max(size, alignment)
         memory[addr] = value
         return addr
     }
     
-    public func allocateBlock(count: Int, elementSize: Int = 8, defaultValue: CValue = .int(0)) -> Int {
-        alignNextAddress(to: max(elementSize, 8))
+    public func allocateBlock(count: Int, elementSize: Int = 8) -> Int {
+        let step = max(elementSize, 1)
+        alignNextAddress(to: min(step, 8))
         let baseAddr = nextAddress
-        let step = max(elementSize, 8)
         nextAddress += max(count * step, step)
+        pointerPointeeSizes[baseAddr] = step
         for i in 0..<count {
-            memory[baseAddr + i * step] = defaultValue
+            memory[baseAddr + i * step] = .int(0)
         }
-        pointerPointeeSizes[baseAddr] = elementSize
         return baseAddr
     }
     
-    public func read(address: Int) -> CValue {
-        if let mapping = addressToMember[address] {
-            return structs[mapping.structId]?[mapping.member] ?? .int(0)
+    public func reallocateBlock(address: Int, newCount: Int, elementSize: Int = 8) -> Int {
+        let newBase = allocateBlock(count: newCount, elementSize: elementSize)
+        let step = max(elementSize, 1)
+        var i = 0
+        while i < newCount {
+            let oldAddr = address + i * step
+            if let val = memory[oldAddr] {
+                memory[newBase + i * step] = val
+            } else {
+                break
+            }
+            i += 1
         }
+        return newBase
+    }
+    
+    public func free(address: Int) {
+        // Soft free
+        memory.removeValue(forKey: address)
+    }
+    
+    public func read(address: Int) -> CValue {
         return memory[address] ?? .int(0)
     }
     
     public func write(address: Int, value: CValue) {
         if let mapping = addressToMember[address] {
-            if structs[mapping.structId] != nil {
-                structs[mapping.structId]?[mapping.member] = value
-            }
-            return
+            structs[mapping.structId]?[mapping.member] = value
         }
         memory[address] = value
     }
     
-    // C-string reading and writing in memory
     public func readCString(at address: Int) -> String {
-        var addr = address
         var bytes: [UInt8] = []
-        while true {
-            guard let val = memory[addr] else { break }
-            let b = UInt8(val.asInt & 0xFF)
-            if b == 0 { break }
-            bytes.append(b)
+        var addr = address
+        while let val = memory[addr] {
+            let byte: UInt8
+            switch val {
+            case .char(let b): byte = b
+            case .int(let i): byte = UInt8(i & 0xFF)
+            default: byte = 0
+            }
+            if byte == 0 { break }
+            bytes.append(byte)
             addr += 1
         }
         return String(decoding: bytes, as: UTF8.self)
@@ -269,6 +313,7 @@ public final class MemoryManager {
         let baseAddr = nextAddress
         nextAddress += max(layout.size, 8)
         structAddresses[id] = baseAddr
+        addressToStructId[baseAddr] = id
         
         // Map member addresses
         for member in layout.members {
@@ -288,6 +333,12 @@ public final class MemoryManager {
     }
     
     public func getStructField(id: Int, name: String) -> CValue {
+        if let baseAddr = structAddresses[id],
+           let layout = structLayouts.values.first(where: { $0.memberMap[name] != nil }),
+           let member = layout.memberMap[name],
+           case .array = member.type {
+            return .pointer(baseAddr + member.offset)
+        }
         return structs[id]?[name] ?? .int(0)
     }
     
@@ -462,6 +513,7 @@ public final class Scope {
     public var variableTypes: [String: CType] = [:]
     public var constVariables: Set<String> = []
     public var referenceTargets: [String: Int] = [:] // For C++ reference variables
+    private var vlaSizes: [String: Int] = [:]
     private var destructors: [() async throws -> Void] = []
     
     public init(parent: Scope? = nil) {
@@ -479,6 +531,15 @@ public final class Scope {
     public func defineReference(name: String, address: Int, type: CType = .int) {
         referenceTargets[name] = address
         variableTypes[name] = type
+    }
+    
+    public func setVLASize(name: String, size: Int) {
+        vlaSizes[name] = size
+    }
+    
+    public func resolveVLASize(name: String) -> Int? {
+        if let s = vlaSizes[name] { return s }
+        return parent?.resolveVLASize(name: name)
     }
     
     public func resolveAddress(name: String) -> Int? {
