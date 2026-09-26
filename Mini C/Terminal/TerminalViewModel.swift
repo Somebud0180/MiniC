@@ -87,6 +87,7 @@ public final class TerminalViewModel: ObservableObject {
     public func load(code: String, fileName: String) {
         if lastRunSource != code && currentFileName != fileName {
             clear()
+            status = .idle
         }
         
         lastRunSource = code
