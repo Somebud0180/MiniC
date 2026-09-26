@@ -141,9 +141,6 @@ struct FolderExplorerView: View {
         explorerList
             .navigationTitle(isRootDirectory ? "Mini C" : folderURL.lastPathComponent)
             .navigationBarTitleDisplayMode(isRootDirectory ? .large : .inline)
-            .refreshable {
-                loadItems()
-            }
             .searchable(text: $searchText, prompt: "Search files and folders")
             .task {
                 loadItems()
@@ -270,6 +267,9 @@ struct FolderExplorerView: View {
                     }
                 }
             }
+        }
+        .refreshable {
+            loadItems()
         }
         .contextMenu {
             Button(action: {
