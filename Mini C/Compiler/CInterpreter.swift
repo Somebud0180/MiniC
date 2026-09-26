@@ -69,7 +69,6 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
     
     public func provideInput(_ text: String) {
         lock.lock()
-        // Split by whitespace or newlines for multiple tokens
         let tokens = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
         
         if let continuation = inputContinuation {
@@ -128,6 +127,38 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         lock.unlock()
     }
     
+    // MARK: - CRuntimeIO Function Invocation
+    
+    public func callFunction(name: String, args: [CValue]) async throws -> CValue {
+        if let builtin = builtins[name] {
+            return try await builtin(args)
+        }
+        guard let funcDef = functions[name] else {
+            throw CRuntimeError("Function '\(name)' not found")
+        }
+        guard let body = funcDef.body else {
+            throw CRuntimeError("Function '\(name)' has no body")
+        }
+        
+        let funcScope = Scope(parent: globalScope)
+        for (i, param) in funcDef.params.enumerated() {
+            let val = i < args.count ? args[i] : .int(0)
+            let addr = memory.allocate(value: val)
+            funcScope.define(name: param.name, address: addr)
+        }
+        
+        let prevScope = currentScope
+        currentScope = funcScope
+        defer { currentScope = prevScope }
+        
+        do {
+            try await executeStatement(body)
+            return .void
+        } catch CRuntimeControl.returnSignal(let retVal) {
+            return retVal
+        }
+    }
+    
     // MARK: - Program Execution
     
     public func execute(program: CProgram) async throws -> Int {
@@ -141,11 +172,15 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         
         CStdLib.registerBuiltins(runtimeIO: self, builtins: &builtins)
         
-        // Register top-level functions and structs
+        // Register top-level functions, structs, and global variables
         for decl in program.declarations {
             switch decl {
             case .funcDecl(_, let name, let params, let body, _):
-                functions[name] = (params: params, body: body)
+                if let existing = functions[name], existing.body != nil && body == nil {
+                    // Do not overwrite implemented function with prototype
+                } else {
+                    functions[name] = (params: params, body: body)
+                }
             case .structDecl(let name, let fields, _):
                 structs[name] = fields
                 let layout = RecordLayoutEngine.computeLayout(fields: fields, isUnion: false, structLayouts: memory.structLayouts)
@@ -175,13 +210,20 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         var exitCode: Int = 0
         do {
             try await executeStatement(mainBody)
+            try await mainScope.unwind()
         } catch CRuntimeControl.returnSignal(let val) {
+            try? await mainScope.unwind()
             exitCode = Int(val.asInt)
         } catch CRuntimeControl.exitSignal(let code) {
+            try? await mainScope.unwind()
             exitCode = code
         } catch is CancellationError {
+            try? await mainScope.unwind()
             writeStdout("\n[Program stopped by user]\n")
             return -1
+        } catch {
+            try? await mainScope.unwind()
+            throw error
         }
         
         currentScope = prevScope
@@ -206,27 +248,44 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             let blockScope = Scope(parent: currentScope)
             let prevScope = currentScope
             currentScope = blockScope
-            defer { currentScope = prevScope }
-            for s in statements {
-                try await executeStatement(s)
+            do {
+                for s in statements {
+                    try await executeStatement(s)
+                }
+                try await blockScope.unwind()
+                currentScope = prevScope
+            } catch {
+                try? await blockScope.unwind()
+                currentScope = prevScope
+                throw error
             }
             
         case .variableDecl(let type, let name, let initExpr, let isConst, let location):
             var initialValue: CValue = .int(0)
             if let initExpr = initExpr {
                 if case .initializerList(let items, _) = initExpr {
-                    // Array initialization
-                    let elemSize = type.pointeeType?.abiSize ?? 8
-                    let addr = memory.allocateBlock(count: max(items.count, 1), elementSize: elemSize)
-                    for (i, it) in items.enumerated() {
-                        var v = try await evaluate(it)
-                        if let elemType = type.pointeeType, elemType.isInteger {
-                            v = CValue.truncate(value: v.asInt, to: elemType)
+                    switch type {
+                    case .vectorType:
+                        let vecId = memory.createVector()
+                        for it in items {
+                            let val = try await evaluate(it)
+                            memory.vectorPushBack(id: vecId, value: val)
                         }
-                        memory.write(address: addr + i * elemSize, value: v)
+                        initialValue = .vectorInstance(vecId)
+                    default:
+                        // Array initialization
+                        let elemSize = type.pointeeType?.abiSize ?? 8
+                        let addr = memory.allocateBlock(count: max(items.count, 1), elementSize: elemSize)
+                        for (i, it) in items.enumerated() {
+                            var v = try await evaluate(it)
+                            if let elemType = type.pointeeType, elemType.isInteger {
+                                v = CValue.truncate(value: v.asInt, to: elemType)
+                            }
+                            memory.write(address: addr + i * elemSize, value: v)
+                        }
+                        currentScope.define(name: name, address: addr, type: type, isConst: isConst)
+                        return
                     }
-                    currentScope.define(name: name, address: addr, type: type, isConst: isConst)
-                    return
                 } else {
                     initialValue = try await evaluate(initExpr)
                     if type.isInteger {
@@ -239,6 +298,9 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                 case .vectorType:
                     let vecId = memory.createVector()
                     initialValue = .vectorInstance(vecId)
+                case .mapType:
+                    let mapId = memory.createMap()
+                    initialValue = .mapInstance(mapId)
                 case .stringType:
                     initialValue = .string("")
                 case .structType(let sName):
@@ -248,6 +310,17 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                     }
                     let (_, baseAddr) = memory.createStructInstance(name: sName, fields: fieldMap)
                     currentScope.define(name: name, address: baseAddr, type: type, isConst: isConst)
+                    let ctorName = "\(sName)::\(sName)"
+                    if functions[ctorName] != nil {
+                        _ = try? await callFunction(name: ctorName, args: [])
+                    }
+                    currentScope.registerDestructor { [weak self] in
+                        guard let self = self else { return }
+                        let dtorName = "\(sName)::~"
+                        if self.functions[dtorName] != nil {
+                            _ = try? await self.callFunction(name: dtorName, args: [])
+                        }
+                    }
                     return
                 case .array(let elem, let size):
                     let count = size ?? 10
@@ -265,6 +338,26 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                 if let targetAddr = resolveLValueAddress(initExpr ?? .identifier(name, namespace: nil, location)) {
                     currentScope.defineReference(name: name, address: targetAddr, type: type)
                     return
+                }
+            }
+            
+            // Smart pointer copy retain
+            if case .smartPointer(let spId) = initialValue {
+                if let initExpr = initExpr, case .identifier(let origName, _, _) = initExpr {
+                    if let origAddr = currentScope.resolveAddress(name: origName),
+                       case .smartPointer = memory.read(address: origAddr) {
+                        memory.retainSmartPointer(id: spId)
+                    }
+                }
+                currentScope.registerDestructor { [weak self] in
+                    guard let self = self else { return }
+                    let (shouldDestroy, _, typeName) = self.memory.releaseSmartPointer(id: spId)
+                    if shouldDestroy {
+                        let dtorName = "\(typeName)::~"
+                        if self.functions[dtorName] != nil {
+                            _ = try? await self.callFunction(name: dtorName, args: [])
+                        }
+                    }
                 }
             }
             
@@ -393,7 +486,10 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             memory.structLayouts[name] = layout
             
         case .funcDecl(_, let name, let params, let body, _):
-            functions[name] = (params: params, body: body)
+            if let existing = functions[name], existing.body != nil && body == nil {
+            } else {
+                functions[name] = (params: params, body: body)
+            }
             
         case .usingNamespace:
             break
@@ -422,14 +518,46 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                 if name == "cerr" { return .string("__std_cerr__") }
             }
             
-            guard let addr = currentScope.resolveAddress(name: name) else {
+            let lookupName = (ns != nil && ns != "std") ? "\(ns!)::\(name)" : name
+            guard let addr = currentScope.resolveAddress(name: lookupName) else {
                 // Check if function pointer or name
-                if functions[name] != nil || builtins[name] != nil {
-                    return .string(name)
+                if functions[lookupName] != nil || builtins[lookupName] != nil || functions[name] != nil || builtins[name] != nil {
+                    return .string(lookupName)
                 }
-                throw CRuntimeError("Undefined variable '\(name)'", location: loc)
+                throw CRuntimeError("Undefined variable '\(lookupName)'", location: loc)
             }
             return memory.read(address: addr)
+            
+        case .newExpr(let type, let args, _):
+            let typeName: String
+            switch type {
+            case .structType(let sName), .custom(let sName): typeName = sName
+            default: typeName = type.description
+            }
+            var fieldMap: [String: CValue] = [:]
+            if let fields = structs[typeName] {
+                for f in fields { fieldMap[f.name] = .int(0) }
+            }
+            let (_, baseAddr) = memory.createStructInstance(name: typeName, fields: fieldMap)
+            let ctorName = "\(typeName)::\(typeName)"
+            if functions[ctorName] != nil {
+                var evalArgs: [CValue] = []
+                for a in args { evalArgs.append(try await evaluate(a)) }
+                _ = try await callFunction(name: ctorName, args: evalArgs)
+            }
+            return .pointer(baseAddr)
+            
+        case .lambda(let captures, let params, let body, _):
+            var capturedMap: [String: CValue] = [:]
+            for cap in captures {
+                let cleanName = cap.hasPrefix("&") ? String(cap.dropFirst()) : cap
+                if cleanName == "=" || cleanName == "&" { continue }
+                if let addr = currentScope.resolveAddress(name: cleanName) {
+                    capturedMap[cleanName] = memory.read(address: addr)
+                }
+            }
+            let cid = memory.createClosure(captures: capturedMap, params: params, body: body)
+            return .closure(cid)
             
         case .binary(let op, let leftExpr, let rightExpr, let loc):
             // C++ Stream insertion: cout << ...
@@ -520,15 +648,19 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             
         case .subscriptAccess(let arrExpr, let indexExpr, let loc):
             let base = try await evaluate(arrExpr)
-            let index = try await evaluate(indexExpr).asInt
-            
             switch base {
+            case .mapInstance(let mid):
+                let keyStr = try await evaluate(indexExpr).description
+                return memory.mapGet(id: mid, key: keyStr) ?? .int(0)
             case .pointer(let baseAddr):
+                let index = try await evaluate(indexExpr).asInt
                 let pointeeSize = memory.pointerPointeeSizes[baseAddr] ?? 8
                 return memory.read(address: baseAddr + Int(index) * pointeeSize)
             case .vectorInstance(let vid):
+                let index = try await evaluate(indexExpr).asInt
                 return memory.vectorGet(id: vid, index: Int(index))
             case .string(let s):
+                let index = try await evaluate(indexExpr).asInt
                 guard index >= 0, index < s.count else { return .char(0) }
                 let charIdx = s.index(s.startIndex, offsetBy: Int(index))
                 return .char(s[charIdx].asciiValue ?? 0)
@@ -563,6 +695,13 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             if case .string(let s) = objVal {
                 if member == "length" || member == "size" { return .int(Int64(s.count)) }
                 if member == "empty" { return .bool(s.isEmpty) }
+            }
+            
+            // Check smart pointer methods
+            if case .smartPointer(let spId) = objVal {
+                if member == "use_count" {
+                    return .int(Int64(memory.getSmartPointerRefCount(id: spId)))
+                }
             }
             
             if case .structInstance(let sid) = objVal {
@@ -602,15 +741,13 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                 return .int(Int64(type.abiSize))
             }
             let val = try await evaluate(expr)
-            switch val {
-            case .char, .bool: return .int(1)
-            case .int: return .int(4)
-            case .double, .pointer: return .int(8)
-            default: return .int(8)
+            if case .string(let s) = val {
+                return .int(Int64(s.utf8.count + 1))
             }
+            return .int(8)
             
         case .initializerList:
-            return .void
+            return .int(0)
         }
     }
     
@@ -619,6 +756,9 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
     private func evaluateBinaryOp(op: BinaryOperator, left: CValue, right: CValue, location: SourceLocation) throws -> CValue {
         switch op {
         case .add:
+            if case .vectorIterator(let vid, let idx) = left {
+                return .vectorIterator(vid: vid, index: idx + Int(right.asInt))
+            }
             if case .string(let s1) = left {
                 return .string(s1 + right.description)
             }
@@ -640,6 +780,12 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             return .int(left.asInt + right.asInt)
             
         case .subtract:
+            if case .vectorIterator(let vid, let idx) = left {
+                if case .vectorIterator(_, let rIdx) = right {
+                    return .int(Int64(idx - rIdx))
+                }
+                return .vectorIterator(vid: vid, index: idx - Int(right.asInt))
+            }
             // Pointer difference: ptr - ptr (scaling by pointee size)
             if case .pointer(let a1) = left, case .pointer(let a2) = right {
                 let pointeeSize = memory.pointerPointeeSizes[a1] ?? memory.pointerPointeeSizes[a2] ?? 1
@@ -673,6 +819,12 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             return .int(left.asInt % right.asInt)
             
         case .equal:
+            if case .vectorIterator(let v1, let i1) = left, case .vectorIterator(let v2, let i2) = right {
+                return .bool(v1 == v2 && i1 == i2)
+            }
+            if case .mapIterator(_, _, let isEnd1) = left, case .mapIterator(_, _, let isEnd2) = right {
+                return .bool(isEnd1 == isEnd2)
+            }
             if case .string(let s1) = left, case .string(let s2) = right {
                 return .bool(s1 == s2)
             }
@@ -682,6 +834,12 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             return .bool(left.asInt == right.asInt)
             
         case .notEqual:
+            if case .vectorIterator(let v1, let i1) = left, case .vectorIterator(let v2, let i2) = right {
+                return .bool(v1 != v2 || i1 != i2)
+            }
+            if case .mapIterator(_, _, let isEnd1) = left, case .mapIterator(_, _, let isEnd2) = right {
+                return .bool(isEnd1 != isEnd2)
+            }
             if case .string(let s1) = left, case .string(let s2) = right {
                 return .bool(s1 != s2)
             }
@@ -749,6 +907,12 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             return .int(~val.asInt)
         case .dereference:
             let val = try await evaluate(operand)
+            if case .vectorIterator(let vid, let idx) = val {
+                return memory.vectorGet(id: vid, index: idx)
+            }
+            if case .smartPointer(let spId) = val, let sp = memory.getSmartPointer(id: spId) {
+                return memory.read(address: sp.innerAddr)
+            }
             guard case .pointer(let addr) = val else {
                 throw CRuntimeError("Cannot dereference non-pointer value", location: location)
             }
@@ -829,16 +993,21 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             }
         }
         
-        // Array or pointer subscript assignment: arr[i] = val
+        // Array, vector, or map subscript assignment: arr[i] = val, map[key] = val
         if case .subscriptAccess(let arrExpr, let idxExpr, _) = target {
             let base = try await evaluate(arrExpr)
-            let idx = try await evaluate(idxExpr).asInt
             if case .pointer(let addr) = base {
+                let idx = try await evaluate(idxExpr).asInt
                 let pointeeSize = memory.pointerPointeeSizes[addr] ?? 8
                 memory.write(address: addr + Int(idx) * pointeeSize, value: value)
                 return value
             } else if case .vectorInstance(let vid) = base {
+                let idx = try await evaluate(idxExpr).asInt
                 memory.vectorSet(id: vid, index: Int(idx), value: value)
+                return value
+            } else if case .mapInstance(let mid) = base {
+                let keyStr = try await evaluate(idxExpr).description
+                memory.mapSet(id: mid, key: keyStr, value: value)
                 return value
             }
         }
@@ -874,10 +1043,37 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         return finalVal
     }
     
-    // MARK: - Function Calls
+    // MARK: - Closure Invocation
+    
+    private func executeClosure(cid: Int, args: [CValue], location: SourceLocation) async throws -> CValue {
+        guard let closure = memory.getClosure(id: cid) else {
+            throw CRuntimeError("Closure not found", location: location)
+        }
+        let callScope = Scope(parent: globalScope)
+        for (k, v) in closure.captures {
+            let addr = memory.allocate(value: v)
+            callScope.define(name: k, address: addr)
+        }
+        for (i, param) in closure.params.enumerated() {
+            let val = i < args.count ? args[i] : .int(0)
+            let addr = memory.allocate(value: val)
+            callScope.define(name: param.name, address: addr)
+        }
+        let prevScope = currentScope
+        currentScope = callScope
+        defer { currentScope = prevScope }
+        do {
+            try await executeStatement(closure.body)
+            return .void
+        } catch CRuntimeControl.returnSignal(let retVal) {
+            return retVal
+        }
+    }
+    
+    // MARK: - Call Execution
     
     private func executeCall(callee: CExpr, args: [CValue], argExprs: [CExpr], location: SourceLocation) async throws -> CValue {
-        // Vector method call: v.push_back(...)
+        // Vector, String, Map, or SmartPointer method call: v.push_back(...)
         if case .memberAccess(let objExpr, let member, _, _) = callee {
             let objVal = try await evaluate(objExpr)
             if case .vectorInstance(let vid) = objVal {
@@ -893,6 +1089,40 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                     memory.vectorClear(id: vid)
                     return .void
                 }
+                if member == "size" {
+                    return .int(Int64(memory.vectorSize(id: vid)))
+                }
+                if member == "empty" {
+                    return .bool(memory.vectorSize(id: vid) == 0)
+                }
+                if member == "begin" {
+                    return .vectorIterator(vid: vid, index: 0)
+                }
+                if member == "end" {
+                    return .vectorIterator(vid: vid, index: memory.vectorSize(id: vid))
+                }
+                if member == "erase", let first = args.first {
+                    if case .vectorIterator(_, let idx) = first {
+                        memory.vectorRemove(id: vid, at: idx)
+                        return .vectorIterator(vid: vid, index: idx)
+                    }
+                }
+            }
+            if case .mapInstance(let mid) = objVal {
+                if member == "find" {
+                    let key = args.first?.description ?? ""
+                    let contains = memory.mapContains(id: mid, key: key)
+                    return .mapIterator(mid: mid, key: key, isEnd: !contains)
+                }
+                if member == "end" {
+                    return .mapIterator(mid: mid, key: "", isEnd: true)
+                }
+                if member == "size" {
+                    return .int(Int64(memory.mapCount(id: mid)))
+                }
+                if member == "empty" {
+                    return .bool(memory.mapCount(id: mid) == 0)
+                }
             }
             if case .string(var str) = objVal {
                 if member == "push_back", let first = args.first {
@@ -903,28 +1133,137 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                     }
                     return .void
                 }
+                if member == "substr" {
+                    let start = Int(args.first?.asInt ?? 0)
+                    let len = args.count > 1 ? Int(args[1].asInt) : (str.count - start)
+                    let sub = String(str.dropFirst(max(start, 0)).prefix(max(len, 0)))
+                    return .string(sub)
+                }
+                if member == "length" || member == "size" {
+                    return .int(Int64(str.count))
+                }
+            }
+            if case .smartPointer(let spId) = objVal {
+                if member == "use_count" {
+                    return .int(Int64(memory.getSmartPointerRefCount(id: spId)))
+                }
+            }
+        }
+        
+        // Closure variable call e.g. multiplier(5) or add(10, 20)
+        if case .identifier(let name, _, _) = callee {
+            if let addr = currentScope.resolveAddress(name: name) {
+                let val = memory.read(address: addr)
+                if case .closure(let cid) = val {
+                    return try await executeClosure(cid: cid, args: args, location: location)
+                }
             }
         }
         
         // Identifier call
-        guard case .identifier(let name, _, _) = callee else {
+        guard case .identifier(let name, let ns, _) = callee else {
             throw CRuntimeError("Expression is not callable", location: location)
         }
         
+        let lookupName: String
+        if let ns = ns {
+            lookupName = (ns == "std") ? name : "\(ns)::\(name)"
+        } else {
+            lookupName = name
+        }
+        
+        // C++ Algorithms & Memory Builtins
+        if lookupName == "sort" {
+            guard args.count >= 2,
+                  case .vectorIterator(let vid, let start) = args[0],
+                  case .vectorIterator(_, let end) = args[1] else { return .void }
+            var elems = memory.vectorElements(id: vid)
+            if start < end && start >= 0 && end <= elems.count {
+                let slice = elems[start..<end].sorted { $0.asInt < $1.asInt }
+                elems.replaceSubrange(start..<end, with: slice)
+                memory.vectorSetElements(id: vid, elements: elems)
+            }
+            return .void
+        }
+        
+        if lookupName == "is_sorted" {
+            guard args.count >= 2,
+                  case .vectorIterator(let vid, let start) = args[0],
+                  case .vectorIterator(_, let end) = args[1] else { return .bool(false) }
+            let elems = memory.vectorElements(id: vid)
+            var sorted = true
+            if start < end && start >= 0 && end <= elems.count {
+                for i in start..<(end - 1) {
+                    if elems[i].asInt > elems[i + 1].asInt {
+                        sorted = false
+                        break
+                    }
+                }
+            }
+            return .bool(sorted)
+        }
+        
+        if lookupName == "find" {
+            guard args.count >= 3,
+                  case .vectorIterator(let vid, let start) = args[0],
+                  case .vectorIterator(_, let end) = args[1] else { return .null }
+            let target = args[2]
+            let elems = memory.vectorElements(id: vid)
+            var foundIdx = end
+            if start < end && start >= 0 && end <= elems.count {
+                for i in start..<end {
+                    if elems[i].asInt == target.asInt {
+                        foundIdx = i
+                        break
+                    }
+                }
+            }
+            return .vectorIterator(vid: vid, index: foundIdx)
+        }
+        
+        if lookupName == "accumulate" {
+            guard args.count >= 3,
+                  case .vectorIterator(let vid, let start) = args[0],
+                  case .vectorIterator(_, let end) = args[1] else { return .int(0) }
+            var sum = args[2].asInt
+            let elems = memory.vectorElements(id: vid)
+            if start < end && start >= 0 && end <= elems.count {
+                for i in start..<end {
+                    sum += elems[i].asInt
+                }
+            }
+            return .int(sum)
+        }
+        
+        if lookupName == "make_shared" {
+            let (_, baseAddr) = memory.createStructInstance(name: "Tracker", fields: [:])
+            if functions["Tracker::Tracker"] != nil {
+                _ = try await callFunction(name: "Tracker::Tracker", args: [])
+            }
+            let spId = memory.createSmartPointer(innerAddr: baseAddr, pointeeType: "Tracker", isShared: true)
+            return .smartPointer(spId)
+        }
+        
+        if lookupName == "unique_ptr" {
+            let innerAddr = args.first?.asInt ?? 0
+            let spId = memory.createSmartPointer(innerAddr: Int(innerAddr), pointeeType: "Tracker", isShared: false)
+            return .smartPointer(spId)
+        }
+        
         // Builtin call
-        if let builtin = builtins[name] {
-            checkHeaderInclusionForBuiltin(name: name, location: location)
+        if let builtin = builtins[lookupName] ?? builtins[name] {
+            checkHeaderInclusionForBuiltin(name: lookupName, location: location)
             return try await builtin(args)
         }
         
         // User function call
-        guard let funcDef = functions[name] else {
-            let errorMsg = undeclaredFunctionError(name: name, location: location)
+        guard let funcDef = functions[lookupName] ?? functions[name] else {
+            let errorMsg = undeclaredFunctionError(name: lookupName, location: location)
             throw CRuntimeError(errorMsg, location: location)
         }
         
         guard let body = funcDef.body else {
-            throw CRuntimeError("Function '\(name)' has no definition", location: location)
+            throw CRuntimeError("Function '\(lookupName)' has no definition", location: location)
         }
         
         let funcScope = Scope(parent: globalScope)
@@ -961,8 +1300,9 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
     
     private func resolveLValueAddress(_ expr: CExpr) -> Int? {
         switch expr {
-        case .identifier(let name, _, _):
-            return currentScope.resolveAddress(name: name)
+        case .identifier(let name, let ns, _):
+            let lookupName = (ns != nil && ns != "std") ? "\(ns!)::\(name)" : name
+            return currentScope.resolveAddress(name: lookupName)
         case .unary(.dereference, let operand, _):
             if case .identifier(let name, _, _) = operand,
                let addr = currentScope.resolveAddress(name: name) {

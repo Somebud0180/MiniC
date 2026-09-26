@@ -12,7 +12,7 @@ public struct TypeQualifiers: OptionSet, Sendable {
 
 // MARK: - Types
 
-public indirect enum CType: Equatable, Sendable {
+public indirect enum CType: Equatable, Sendable, CustomStringConvertible {
     // Basic integer types
     case int
     case unsignedInt
@@ -44,6 +44,9 @@ public indirect enum CType: Equatable, Sendable {
     case structType(String)
     case unionType(String)
     case vectorType(CType)
+    case mapType(key: CType, value: CType)
+    case smartPointerType(kind: String, inner: CType)
+    case functionType(returnType: CType, paramTypes: [CType])
     case stringType
     case custom(String)
     
@@ -105,7 +108,7 @@ public indirect enum CType: Equatable, Sendable {
             return 4
         case .long, .unsignedLong, .longLong, .unsignedLongLong, .double:
             return 8
-        case .pointer, .reference, .rvalueReference:
+        case .pointer, .reference, .rvalueReference, .mapType, .smartPointerType, .functionType:
             return 8
         case .array(let elem, let count):
             return (count ?? 1) * elem.abiSize
@@ -127,7 +130,7 @@ public indirect enum CType: Equatable, Sendable {
             return 4
         case .long, .unsignedLong, .longLong, .unsignedLongLong, .double:
             return 8
-        case .pointer, .reference, .rvalueReference:
+        case .pointer, .reference, .rvalueReference, .mapType, .smartPointerType, .functionType:
             return 8
         case .array(let elem, _):
             return elem.abiAlignment
@@ -154,10 +157,47 @@ public indirect enum CType: Equatable, Sendable {
             return p
         case .array(let elem, _):
             return elem
+        case .smartPointerType(_, let inner):
+            return inner
         default:
             return nil
         }
     }
+    
+    public var description: String {
+        switch self {
+        case .int: return "int"
+        case .unsignedInt: return "unsigned int"
+        case .short: return "short"
+        case .unsignedShort: return "unsigned short"
+        case .long: return "long"
+        case .unsignedLong: return "unsigned long"
+        case .longLong: return "long long"
+        case .unsignedLongLong: return "unsigned long long"
+        case .float: return "float"
+        case .double: return "double"
+        case .char: return "char"
+        case .signedChar: return "signed char"
+        case .unsignedChar: return "unsigned char"
+        case .bool: return "bool"
+        case .void: return "void"
+        case .pointer(let inner): return "\(inner.description)*"
+        case .reference(let inner): return "\(inner.description)&"
+        case .rvalueReference(let inner): return "\(inner.description)&&"
+        case .array(let elem, let size):
+            if let size = size { return "\(elem.description)[\(size)]" }
+            return "\(elem.description)[]"
+        case .structType(let name): return name
+        case .unionType(let name): return name
+        case .vectorType(let elem): return "vector<\(elem.description)>"
+        case .mapType(let key, let val): return "map<\(key.description), \(val.description)>"
+        case .smartPointerType(let kind, let inner): return "\(kind)<\(inner.description)>"
+        case .functionType: return "function"
+        case .stringType: return "string"
+        case .custom(let name): return name
+        }
+    }
+
 }
 
 // MARK: - Type Promotion & Conversion Engine (ISO C99 §6.3.1)
@@ -395,6 +435,8 @@ public indirect enum CExpr: Sendable {
     case sizeofType(CType, SourceLocation)
     case sizeofExpr(CExpr, SourceLocation)
     case initializerList([CExpr], SourceLocation)
+    case lambda(captures: [String], params: [(type: CType, name: String, isRef: Bool)], body: CStmt, SourceLocation)
+    case newExpr(type: CType, args: [CExpr], SourceLocation)
     
     public var location: SourceLocation {
         switch self {
@@ -415,7 +457,9 @@ public indirect enum CExpr: Sendable {
              .cast(_, _, let loc),
              .sizeofType(_, let loc),
              .sizeofExpr(_, let loc),
-             .initializerList(_, let loc):
+             .initializerList(_, let loc),
+             .lambda(_, _, _, let loc),
+             .newExpr(_, _, let loc):
             return loc
         }
     }

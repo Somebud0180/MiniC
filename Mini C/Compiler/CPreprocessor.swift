@@ -148,6 +148,10 @@ public final class CPreprocessor {
                 continue
             }
             
+            macros["__LINE__"] = Macro(name: "__LINE__", parameters: nil, replacement: "\(lineNum)")
+            let curFile = fileName.isEmpty ? "main.cpp" : fileName
+            macros["__FILE__"] = Macro(name: "__FILE__", parameters: nil, replacement: "\"" + curFile + "\"")
+            
             // Perform standard macro expansion
             let expandedLine = expandMacros(in: line, hideSet: [])
             processedLines.append(expandedLine)
@@ -693,11 +697,29 @@ public final class CPreprocessor {
             "limits.h", "climits",
             "float.h", "cfloat",
             "errno.h", "cerrno",
+            "inttypes.h", "cinttypes",
+            "stdarg.h", "cstdarg",
+            "setjmp.h", "csetjmp",
+            "signal.h", "csignal",
+            "iso646.h", "ciso646",
+            "wchar.h", "cwchar",
+            "wctype.h", "cwctype",
+            "uchar.h", "cuchar",
+            "fenv.h", "cfenv",
+            "tgmath.h", "ctgmath",
             "fcntl.h",
             "sys/types.h", "sys/stat.h", "sys/time.h",
             "iostream", "vector", "string", "algorithm",
             "utility", "memory", "map", "set", "sstream",
-            "iomanip", "iterator", "stdexcept"
+            "iomanip", "iterator", "stdexcept", "numeric",
+            "functional", "chrono", "random", "tuple",
+            "type_traits", "initializer_list", "list",
+            "deque", "queue", "stack", "unordered_map",
+            "unordered_set", "bitset", "fstream", "new",
+            "exception", "system_error", "ratio", "regex",
+            "atomic", "thread", "mutex", "condition_variable",
+            "future", "string_view", "optional", "variant",
+            "any", "filesystem", "complex", "valarray"
         ]
         return supported.contains(name)
     }

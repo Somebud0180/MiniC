@@ -6,7 +6,7 @@ public enum CTokenType: Equatable, Sendable {
     // Keywords
     case kwInt, kwFloat, kwDouble, kwChar, kwVoid, kwBool
     case kwLong, kwShort, kwUnsigned, kwSigned
-    case kwConst, kwStatic, kwAuto
+    case kwConst, kwStatic, kwAuto, kwInline, kwExtern, kwVolatile, kwConstexpr
     case kwStruct, kwClass, kwPublic, kwPrivate, kwTypedef
     case kwIf, kwElse, kwWhile, kwFor, kwDo, kwReturn, kwBreak, kwContinue
     case kwSwitch, kwCase, kwDefault, kwSizeof, kwNew, kwDelete
@@ -454,6 +454,10 @@ public final class CLexer {
         case "unsigned": type = .kwUnsigned
         case "signed": type = .kwSigned
         case "const": type = .kwConst
+        case "inline": type = .kwInline
+        case "extern": type = .kwExtern
+        case "volatile": type = .kwVolatile
+        case "constexpr": type = .kwConstexpr
         case "static": type = .kwStatic
         case "auto": type = .kwAuto
         case "struct": type = .kwStruct

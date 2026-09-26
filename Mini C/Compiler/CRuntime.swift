@@ -11,6 +11,11 @@ public enum CValue: Equatable, Sendable, CustomStringConvertible {
     case pointer(Int) // Address in MemoryManager
     case structInstance(Int) // ID in MemoryManager
     case vectorInstance(Int) // ID in MemoryManager
+    case mapInstance(Int) // ID in MemoryManager
+    case smartPointer(Int) // ID in MemoryManager
+    case vectorIterator(vid: Int, index: Int)
+    case mapIterator(mid: Int, key: String, isEnd: Bool)
+    case closure(Int) // ID in MemoryManager
     case null
     case void
     
@@ -37,7 +42,9 @@ public enum CValue: Equatable, Sendable, CustomStringConvertible {
         case .bool(let v): return v ? 1 : 0
         case .pointer(let v): return Int64(v)
         case .string(let s): return Int64(s) ?? 0
-        case .null, .void, .structInstance, .vectorInstance: return 0
+        case .vectorIterator(_, let index): return Int64(index)
+        case .closure(let id): return Int64(id)
+        case .null, .void, .structInstance, .vectorInstance, .mapInstance, .smartPointer, .mapIterator: return 0
         }
     }
     
@@ -53,7 +60,8 @@ public enum CValue: Equatable, Sendable, CustomStringConvertible {
         case .bool(let v): return v ? 1.0 : 0.0
         case .pointer(let v): return Double(v)
         case .string(let s): return Double(s) ?? 0.0
-        case .null, .void, .structInstance, .vectorInstance: return 0.0
+        case .vectorIterator(_, let index): return Double(index)
+        case .null, .void, .structInstance, .vectorInstance, .mapInstance, .smartPointer, .mapIterator, .closure: return 0.0
         }
     }
     
@@ -65,8 +73,9 @@ public enum CValue: Equatable, Sendable, CustomStringConvertible {
         case .bool(let v): return v
         case .pointer(let v): return v != 0
         case .string(let s): return !s.isEmpty
+        case .structInstance, .vectorInstance, .mapInstance, .smartPointer, .vectorIterator, .closure: return true
+        case .mapIterator(_, _, let isEnd): return !isEnd
         case .null, .void: return false
-        case .structInstance, .vectorInstance: return true
         }
     }
     
@@ -84,6 +93,11 @@ public enum CValue: Equatable, Sendable, CustomStringConvertible {
         case .pointer(let addr): return addr == 0 ? "NULL" : String(format: "0x%llx", addr)
         case .structInstance(let id): return "<struct #\(id)>"
         case .vectorInstance(let id): return "<vector #\(id)>"
+        case .mapInstance(let id): return "<map #\(id)>"
+        case .smartPointer(let id): return "<smart_ptr #\(id)>"
+        case .vectorIterator(let vid, let idx): return "<vector_iter vid:\(vid) idx:\(idx)>"
+        case .mapIterator(_, let key, let isEnd): return isEnd ? "<map_iter end>" : "<map_iter key:\(key)>"
+        case .closure(let id): return "<lambda #\(id)>"
         case .null: return "NULL"
         case .void: return "void"
         }
@@ -126,6 +140,26 @@ public final class MemoryManager {
     private var vectors: [Int: [CValue]] = [:]
     private var nextVectorId: Int = 1
     
+    private var maps: [Int: [(key: String, value: CValue)]] = [:]
+    private var nextMapId: Int = 1
+    
+    public struct SmartPointerRecord: Sendable {
+        public var innerAddr: Int
+        public var refCountAddr: Int
+        public var pointeeType: String
+        public var isShared: Bool
+    }
+    private var smartPointers: [Int: SmartPointerRecord] = [:]
+    private var nextSmartPtrId: Int = 1
+    
+    public struct ClosureRecord: Sendable {
+        public let captures: [String: CValue]
+        public let params: [(type: CType, name: String, isRef: Bool)]
+        public let body: CStmt
+    }
+    private var closures: [Int: ClosureRecord] = [:]
+    private var nextClosureId: Int = 1
+    
     // Address -> element size for pointer arithmetic
     public var pointerPointeeSizes: [Int: Int] = [:]
     
@@ -140,6 +174,12 @@ public final class MemoryManager {
         nextStructId = 1
         vectors.removeAll()
         nextVectorId = 1
+        maps.removeAll()
+        nextMapId = 1
+        smartPointers.removeAll()
+        nextSmartPtrId = 1
+        closures.removeAll()
+        nextClosureId = 1
         pointerPointeeSizes.removeAll()
     }
     
@@ -211,6 +251,13 @@ public final class MemoryManager {
         memory[addr] = .char(0) // null terminator
     }
     
+    public func allocateCString(_ str: String) -> Int {
+        let count = str.utf8.count + 1
+        let addr = allocateBlock(count: count, elementSize: 1)
+        writeCString(str, to: addr)
+        return addr
+    }
+    
     // Standard Struct Layout Allocation
     public func createStructInstance(name: String, fields: [String: CValue]) -> (id: Int, address: Int) {
         let id = nextStructId
@@ -220,7 +267,7 @@ public final class MemoryManager {
         let layout = structLayouts[name] ?? RecordLayout(size: 8, alignment: 8, members: [])
         alignNextAddress(to: layout.alignment)
         let baseAddr = nextAddress
-        nextAddress += layout.size
+        nextAddress += max(layout.size, 8)
         structAddresses[id] = baseAddr
         
         // Map member addresses
@@ -279,6 +326,12 @@ public final class MemoryManager {
         _ = vectors[id]?.popLast()
     }
     
+    public func vectorRemove(id: Int, at index: Int) {
+        guard var vec = vectors[id], index >= 0, index < vec.count else { return }
+        vec.remove(at: index)
+        vectors[id] = vec
+    }
+    
     public func vectorSize(id: Int) -> Int {
         return vectors[id]?.count ?? 0
     }
@@ -297,6 +350,107 @@ public final class MemoryManager {
     
     public func vectorClear(id: Int) {
         vectors[id]?.removeAll()
+    }
+    
+    public func vectorElements(id: Int) -> [CValue] {
+        return vectors[id] ?? []
+    }
+    
+    public func vectorSetElements(id: Int, elements: [CValue]) {
+        vectors[id] = elements
+    }
+    
+    // Maps
+    public func createMap() -> Int {
+        let id = nextMapId
+        nextMapId += 1
+        maps[id] = []
+        return id
+    }
+    
+    public func mapSet(id: Int, key: String, value: CValue) {
+        guard var entries = maps[id] else { return }
+        if let idx = entries.firstIndex(where: { $0.key == key }) {
+            entries[idx].value = value
+        } else {
+            entries.append((key: key, value: value))
+        }
+        maps[id] = entries
+    }
+    
+    public func mapGet(id: Int, key: String) -> CValue? {
+        return maps[id]?.first(where: { $0.key == key })?.value
+    }
+    
+    public func mapContains(id: Int, key: String) -> Bool {
+        return maps[id]?.contains(where: { $0.key == key }) ?? false
+    }
+    
+    public func mapCount(id: Int) -> Int {
+        return maps[id]?.count ?? 0
+    }
+    
+    // Smart Pointers
+    public func createSmartPointer(innerAddr: Int, pointeeType: String, isShared: Bool) -> Int {
+        let id = nextSmartPtrId
+        nextSmartPtrId += 1
+        var refCountAddr = 0
+        if isShared {
+            refCountAddr = allocate(value: .int(1))
+        }
+        smartPointers[id] = SmartPointerRecord(
+            innerAddr: innerAddr,
+            refCountAddr: refCountAddr,
+            pointeeType: pointeeType,
+            isShared: isShared
+        )
+        return id
+    }
+    
+    public func getSmartPointer(id: Int) -> SmartPointerRecord? {
+        return smartPointers[id]
+    }
+    
+    public func retainSmartPointer(id: Int) {
+        guard let sp = smartPointers[id], sp.isShared, sp.refCountAddr != 0 else { return }
+        let cur = read(address: sp.refCountAddr).asInt
+        write(address: sp.refCountAddr, value: .int(cur + 1))
+    }
+    
+    public func releaseSmartPointer(id: Int) -> (shouldDestroy: Bool, innerAddr: Int, pointeeType: String) {
+        guard let sp = smartPointers[id] else { return (false, 0, "") }
+        if !sp.isShared {
+            smartPointers.removeValue(forKey: id)
+            return (true, sp.innerAddr, sp.pointeeType)
+        }
+        if sp.refCountAddr != 0 {
+            let cur = read(address: sp.refCountAddr).asInt
+            let next = max(cur - 1, 0)
+            write(address: sp.refCountAddr, value: .int(next))
+            if next == 0 {
+                smartPointers.removeValue(forKey: id)
+                return (true, sp.innerAddr, sp.pointeeType)
+            }
+        }
+        return (false, sp.innerAddr, sp.pointeeType)
+    }
+    
+    public func getSmartPointerRefCount(id: Int) -> Int {
+        guard let sp = smartPointers[id] else { return 0 }
+        if !sp.isShared { return 1 }
+        return Int(read(address: sp.refCountAddr).asInt)
+    }
+    
+    // Closures
+    public func createClosure(captures: [String: CValue], params: [(type: CType, name: String, isRef: Bool)], body: CStmt) -> Int {
+        let id = nextClosureId
+        nextClosureId += 1
+        closures[id] = ClosureRecord(captures: captures, params: params, body: body)
+        return id
+    }
+    
+    public func getClosure(id: Int) -> ClosureRecord? {
+        return closures[id]
     }
 }
 
@@ -334,14 +488,31 @@ public final class Scope {
         if let addr = variables[name] {
             return addr
         }
-        return parent?.resolveAddress(name: name)
+        if let parentAddr = parent?.resolveAddress(name: name) {
+            return parentAddr
+        }
+        // Fallback for static struct/class members: if looking for "member", check for "*::member"
+        for (varName, addr) in variables {
+            if varName.hasSuffix("::\(name)") {
+                return addr
+            }
+        }
+        return nil
     }
     
     public func resolveType(name: String) -> CType? {
         if let t = variableTypes[name] {
             return t
         }
-        return parent?.resolveType(name: name)
+        if let parentType = parent?.resolveType(name: name) {
+            return parentType
+        }
+        for (varName, t) in variableTypes {
+            if varName.hasSuffix("::\(name)") {
+                return t
+            }
+        }
+        return nil
     }
     
     public func isConst(name: String) -> Bool {

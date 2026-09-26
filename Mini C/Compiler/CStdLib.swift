@@ -4,6 +4,7 @@ public protocol CRuntimeIO: AnyObject {
     func writeStdout(_ text: String)
     func writeStderr(_ text: String)
     func readStdin() async throws -> String
+    func callFunction(name: String, args: [CValue]) async throws -> CValue
     var memory: MemoryManager { get }
 }
 
@@ -123,7 +124,7 @@ public final class CStdLib {
             return .double(hypot(x, y))
         }
         
-        // MARK: - stdlib: atoi, atof, rand
+        // MARK: - stdlib: atoi, atof, strtol, rand, qsort, bsearch
         builtins["atoi"] = { args in
             let str = args.first?.description ?? ""
             return .int(Int64(Int(str) ?? 0))
@@ -131,6 +132,90 @@ public final class CStdLib {
         builtins["atof"] = { args in
             let str = args.first?.description ?? ""
             return .double(Double(str) ?? 0.0)
+        }
+        builtins["strtol"] = { args in
+            guard let first = args.first else { return .int(0) }
+            let str = casePointer(first, memory: runtimeIO.memory)
+            let base = args.count > 2 ? Int(args[2].asInt) : 10
+            var trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+            var sign: Int64 = 1
+            if trimmed.hasPrefix("-") {
+                sign = -1
+                trimmed = String(trimmed.dropFirst())
+            } else if trimmed.hasPrefix("+") {
+                trimmed = String(trimmed.dropFirst())
+            }
+            if base == 16, (trimmed.hasPrefix("0x") || trimmed.hasPrefix("0X")) {
+                trimmed = String(trimmed.dropFirst(2))
+            } else if base == 2, (trimmed.hasPrefix("0b") || trimmed.hasPrefix("0B")) {
+                trimmed = String(trimmed.dropFirst(2))
+            }
+            let val = Int64(trimmed, radix: base) ?? 0
+            if args.count > 1, case .pointer(let endptrAddr) = args[1], endptrAddr != 0 {
+                let dummyAddr = runtimeIO.memory.allocateCString("")
+                runtimeIO.memory.write(address: endptrAddr, value: .pointer(dummyAddr))
+            }
+            return .int(sign * val)
+        }
+        builtins["qsort"] = { args in
+            guard args.count >= 4, case .pointer(let baseAddr) = args[0] else { return .void }
+            let count = Int(args[1].asInt)
+            let elemSize = max(Int(args[2].asInt), 1)
+            let cmpName: String
+            switch args[3] {
+            case .string(let s): cmpName = s
+            default: cmpName = args[3].description
+            }
+            
+            for i in 0..<count {
+                for j in (i + 1)..<count {
+                    let addrI = baseAddr + i * elemSize
+                    let addrJ = baseAddr + j * elemSize
+                    let cmpVal = try await runtimeIO.callFunction(name: cmpName, args: [.pointer(addrI), .pointer(addrJ)])
+                    if cmpVal.asInt > 0 {
+                        for b in 0..<elemSize {
+                            let vi = runtimeIO.memory.read(address: addrI + b)
+                            let vj = runtimeIO.memory.read(address: addrJ + b)
+                            runtimeIO.memory.write(address: addrI + b, value: vj)
+                            runtimeIO.memory.write(address: addrJ + b, value: vi)
+                        }
+                    }
+                }
+            }
+            return .void
+        }
+        builtins["bsearch"] = { args in
+            guard args.count >= 5, case .pointer(let baseAddr) = args[1] else { return .null }
+            let key = args[0]
+            let count = Int(args[2].asInt)
+            let elemSize = max(Int(args[3].asInt), 1)
+            let cmpName: String
+            switch args[4] {
+            case .string(let s): cmpName = s
+            default: cmpName = args[4].description
+            }
+            
+            var low = 0
+            var high = count - 1
+            while low <= high {
+                let mid = (low + high) / 2
+                let midAddr = baseAddr + mid * elemSize
+                let keyAddr: Int
+                if case .pointer(let ka) = key {
+                    keyAddr = ka
+                } else {
+                    keyAddr = runtimeIO.memory.allocate(value: key)
+                }
+                let cmpVal = try await runtimeIO.callFunction(name: cmpName, args: [.pointer(keyAddr), .pointer(midAddr)])
+                if cmpVal.asInt == 0 {
+                    return .pointer(midAddr)
+                } else if cmpVal.asInt < 0 {
+                    high = mid - 1
+                } else {
+                    low = mid + 1
+                }
+            }
+            return .null
         }
         builtins["rand"] = { _ in
             return .int(Int64(arc4random_uniform(UInt32(Int32.max))))
@@ -683,8 +768,8 @@ public final class CStdLib {
                         }
                     case "f":
                         let val = arg.asDouble
-                        let prec = precision ?? 6
-                        let raw = String(format: "%.\(prec)f", val)
+                        _ = precision ?? 6
+                        let raw = String(format: "%.\\(prec)f", val)
                         if let w = width, raw.count < w {
                             let pad = isZeroPadded ? "0" : " "
                             formattedArg = String(repeating: pad, count: w - raw.count) + raw
@@ -816,7 +901,8 @@ public final class CStdLib {
         // <stdlib.h>
         "malloc": "<stdlib.h>", "free": "<stdlib.h>", "calloc": "<stdlib.h>", "realloc": "<stdlib.h>",
         "exit": "<stdlib.h>", "_exit": "<stdlib.h>", "abort": "<stdlib.h>", "rand": "<stdlib.h>",
-        "srand": "<stdlib.h>", "atoi": "<stdlib.h>", "atof": "<stdlib.h>", "abs": "<stdlib.h>",
+        "srand": "<stdlib.h>", "atoi": "<stdlib.h>", "atof": "<stdlib.h>", "strtol": "<stdlib.h>",
+        "qsort": "<stdlib.h>", "bsearch": "<stdlib.h>", "abs": "<stdlib.h>",
         "labs": "<stdlib.h>", "getenv": "<stdlib.h>", "system": "<stdlib.h>",
         
         // <string.h>
@@ -871,8 +957,6 @@ public final class CStdLib {
         "fwrite": ("<stdio.h>", "File stream I/O (fwrite) is not currently supported in Mini C runtime"),
         "fseek": ("<stdio.h>", "File stream I/O is not currently supported in Mini C runtime"),
         "ftell": ("<stdio.h>", "File stream I/O is not currently supported in Mini C runtime"),
-        "qsort": ("<stdlib.h>", "'qsort' is not currently implemented in Mini C. You can write a custom sorting function"),
-        "bsearch": ("<stdlib.h>", "'bsearch' is not currently implemented in Mini C"),
         "kill": ("<signal.h>", "Signals (<signal.h>) are not supported in Mini C"),
         "signal": ("<signal.h>", "Signals (<signal.h>) are not supported in Mini C"),
         "sigaction": ("<signal.h>", "Signals (<signal.h>) are not supported in Mini C"),
