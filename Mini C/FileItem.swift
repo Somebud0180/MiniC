@@ -104,3 +104,12 @@ struct FileItem: Identifiable, Hashable, Equatable {
         return formatter.string(from: date)
     }
 }
+
+struct FolderItemInfo: Identifiable, Hashable {
+    var id: URL { url }
+    let url: URL
+    let name: String
+    let relativePath: String
+    let depth: Int
+    let isRoot: Bool
+}

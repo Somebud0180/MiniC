@@ -102,13 +102,30 @@ struct FolderExplorerView: View {
     @State private var itemToDelete: FileItem? = nil
     @State private var showDeleteConfirmation: Bool = false
     
+    // Move states
+    @State private var itemToMove: FileItem? = nil
+    @State private var showMoveSheet: Bool = false
+    @State private var targetedFolderURL: URL? = nil
+    @State private var isParentDropTargeted: Bool = false
+    
     // Error state
     @State private var alertErrorMessage: String? = nil
     @State private var showAlertError: Bool = false
     @State private var showSettingsSheet: Bool = false
     
     var isRootDirectory: Bool {
-        folderURL.path == FileManagerService.shared.documentsDirectory.path
+        folderURL.standardizedFileURL.path == FileManagerService.shared.documentsDirectory.standardizedFileURL.path
+    }
+    
+    var parentFolderURL: URL {
+        folderURL.deletingLastPathComponent()
+    }
+    
+    var parentFolderName: String {
+        if parentFolderURL.standardizedFileURL.path == FileManagerService.shared.documentsDirectory.standardizedFileURL.path {
+            return "Mini C"
+        }
+        return parentFolderURL.lastPathComponent
     }
     
     var filteredItems: [FileItem] {
@@ -129,10 +146,56 @@ struct FolderExplorerView: View {
             .task {
                 loadItems()
             }
+            .onAppear {
+                loadItems()
+            }
+            .onChange(of: FileManagerService.shared.directoryChangeCount) {
+                loadItems()
+            }
     }
     
     private var explorerList: some View {
         List {
+            // Drop target banner to move files out when inside a subfolder
+            if !isRootDirectory {
+                Section {
+                    HStack(spacing: 12) {
+                        Image(systemName: "arrow.turn.up.left")
+                            .font(.headline)
+                            .foregroundStyle(isParentDropTargeted ? Color.accentColor : Color.secondary)
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Move out to \(parentFolderName)")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                            Text("Drop files here to move them out")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        
+                        Spacer()
+                        
+                        Image(systemName: "tray.and.arrow.up")
+                            .font(.subheadline)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                    .listRowBackground(
+                        isParentDropTargeted ? Color.accentColor.opacity(0.18) : Color.clear
+                    )
+                    .dropDestination(for: URL.self) { urls, _ in
+                        guard let droppedURL = urls.first else { return false }
+                        moveItem(at: droppedURL, to: parentFolderURL)
+                        return true
+                    } isTargeted: { targeted in
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isParentDropTargeted = targeted
+                        }
+                    }
+                }
+            }
+            
             if filteredItems.isEmpty {
                 emptyStateView
             } else {
@@ -141,6 +204,22 @@ struct FolderExplorerView: View {
                         if item.isDirectory {
                             NavigationLink(value: item) {
                                 FolderRowView(item: item)
+                            }
+                            .listRowBackground(
+                                targetedFolderURL == item.url ? Color.accentColor.opacity(0.18) : nil
+                            )
+                            .draggable(item.url)
+                            .dropDestination(for: URL.self) { urls, _ in
+                                guard let droppedURL = urls.first else { return false }
+                                moveItem(at: droppedURL, to: item.url)
+                                return true
+                            } isTargeted: { targeted in
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    targetedFolderURL = targeted ? item.url : nil
+                                }
+                            }
+                            .swipeActions(edge: .leading) {
+                                moveSwipeButton(for: item)
                             }
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 deleteButton(for: item)
@@ -160,9 +239,13 @@ struct FolderExplorerView: View {
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .draggable(item.url)
                             .listRowBackground(
                                 selectedFileURL == item.url ? Color.accentColor.opacity(0.15) : nil
                             )
+                            .swipeActions(edge: .leading) {
+                                moveSwipeButton(for: item)
+                            }
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 deleteButton(for: item)
                                 renameButton(for: item)
@@ -229,6 +312,21 @@ struct FolderExplorerView: View {
         .sheet(isPresented: $showCreateFileDialog) {
             createFileSheet
                 .presentationDetents([.medium])
+        }
+        .sheet(isPresented: $showMoveSheet) {
+            if let item = itemToMove {
+                MoveItemSheet(
+                    item: item,
+                    currentFolderURL: folderURL,
+                    onMove: { destinationURL in
+                        moveItem(at: item.url, to: destinationURL)
+                        showMoveSheet = false
+                        itemToMove = nil
+                    }
+                )
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+            }
         }
         .alert("New Folder", isPresented: $showCreateFolderDialog) {
             TextField("Folder Name", text: $newFolderName)
@@ -353,7 +451,25 @@ struct FolderExplorerView: View {
             Label("Duplicate", systemImage: "plus.square.on.square")
         }
         
+        Divider()
+        
+        // Direct action to move out to parent directory when inside a subfolder
+        if !isRootDirectory {
+            Button {
+                moveToParent(item: item)
+            } label: {
+                Label("Move out to '\(parentFolderName)'", systemImage: "arrow.turn.up.left")
+            }
+        }
+        
+        Button {
+            startMove(for: item)
+        } label: {
+            Label("Move...", systemImage: "folder")
+        }
+        
         if !item.isDirectory {
+            Divider()
             ShareLink(item: item.url) {
                 Label("Share", systemImage: "square.and.arrow.up")
             }
@@ -394,6 +510,15 @@ struct FolderExplorerView: View {
             Label("Duplicate", systemImage: "plus.square.on.square")
         }
         .tint(.blue)
+    }
+    
+    private func moveSwipeButton(for item: FileItem) -> some View {
+        Button {
+            startMove(for: item)
+        } label: {
+            Label("Move", systemImage: "folder")
+        }
+        .tint(.indigo)
     }
     
     // MARK: - Empty State
@@ -545,7 +670,7 @@ struct FolderExplorerView: View {
         guard let item = itemToRename else { return }
         do {
             let newURL = try FileManagerService.shared.renameItem(at: item.url, to: renameInput)
-            if selectedFileURL == item.url {
+            if selectedFileURL?.standardizedFileURL.path == item.url.standardizedFileURL.path {
                 selectedFileURL = newURL
             }
             itemToRename = nil
@@ -555,11 +680,46 @@ struct FolderExplorerView: View {
         }
     }
     
+    private func startMove(for item: FileItem) {
+        itemToMove = item
+        showMoveSheet = true
+    }
+    
+    private func moveToParent(item: FileItem) {
+        guard !isRootDirectory else { return }
+        moveItem(at: item.url, to: parentFolderURL)
+    }
+    
+    private func moveItem(at sourceURL: URL, to destinationFolderURL: URL) {
+        do {
+            let newURL = try FileManagerService.shared.moveItem(at: sourceURL, to: destinationFolderURL)
+            updateSelectedFileAfterMove(from: sourceURL, to: newURL)
+            loadItems()
+        } catch {
+            showError(error.localizedDescription)
+        }
+    }
+    
+    private func updateSelectedFileAfterMove(from sourceURL: URL, to destinationURL: URL) {
+        let sourceStandardized = sourceURL.standardizedFileURL
+        let destStandardized = destinationURL.standardizedFileURL
+        
+        if let currentSelected = selectedFileURL?.standardizedFileURL {
+            if currentSelected.path == sourceStandardized.path {
+                selectedFileURL = destStandardized
+            } else if currentSelected.path.hasPrefix(sourceStandardized.path + "/") {
+                let relativePath = String(currentSelected.path.dropFirst(sourceStandardized.path.count))
+                selectedFileURL = destStandardized.appendingPathComponent(relativePath)
+            }
+        }
+    }
+    
     private func performDelete() {
         guard let item = itemToDelete else { return }
         do {
             try FileManagerService.shared.deleteItem(at: item.url)
-            if selectedFileURL == item.url || (item.isDirectory && selectedFileURL?.path.hasPrefix(item.url.path) == true) {
+            if selectedFileURL?.standardizedFileURL.path == item.url.standardizedFileURL.path ||
+                (item.isDirectory && selectedFileURL?.standardizedFileURL.path.hasPrefix(item.url.standardizedFileURL.path + "/") == true) {
                 selectedFileURL = nil
             }
             itemToDelete = nil
@@ -581,6 +741,234 @@ struct FolderExplorerView: View {
     private func showError(_ message: String) {
         alertErrorMessage = message
         showAlertError = true
+    }
+}
+
+// MARK: - Move Item Sheet
+
+struct MoveItemSheet: View {
+    let item: FileItem
+    let currentFolderURL: URL
+    let onMove: (URL) -> Void
+    
+    @Environment(\.dismiss) private var dismiss
+    
+    @State private var availableFolders: [FolderItemInfo] = []
+    @State private var selectedDestinationURL: URL? = nil
+    
+    // New folder inside sheet
+    @State private var showNewFolderDialog: Bool = false
+    @State private var newFolderName: String = ""
+    @State private var alertErrorMessage: String? = nil
+    @State private var showAlertError: Bool = false
+    
+    private var isCurrentLocation: Bool {
+        guard let selected = selectedDestinationURL else { return false }
+        return selected.standardizedFileURL.path == currentFolderURL.standardizedFileURL.path
+    }
+    
+    private var currentLocationName: String {
+        if currentFolderURL.standardizedFileURL.path == FileManagerService.shared.documentsDirectory.standardizedFileURL.path {
+            return "Mini C (Root)"
+        }
+        return currentFolderURL.lastPathComponent
+    }
+    
+    private var moveButtonTitle: String {
+        guard let selected = selectedDestinationURL else {
+            return "Select Destination"
+        }
+        if isCurrentLocation {
+            return "Already in this folder"
+        }
+        let folderName = selected.standardizedFileURL.path == FileManagerService.shared.documentsDirectory.standardizedFileURL.path ? "Mini C" : selected.lastPathComponent
+        return "Move to '\(folderName)'"
+    }
+    
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                // Header with item info
+                HStack(spacing: 12) {
+                    if item.isDirectory {
+                        Image(systemName: "folder.fill")
+                            .font(.title2)
+                            .foregroundStyle(.blue)
+                    } else if let type = item.fileType {
+                        Image(systemName: type.systemIcon)
+                            .font(.title2)
+                            .foregroundStyle(type.badgeColor)
+                    } else {
+                        Image(systemName: "doc.fill")
+                            .font(.title2)
+                            .foregroundStyle(.gray)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.name)
+                            .font(.headline)
+                        
+                        Text("Current location: \(currentLocationName)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    
+                    Spacer()
+                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.secondary.opacity(0.08))
+                
+                // Destination Folders List
+                List {
+                    Section {
+                        ForEach(availableFolders) { folder in
+                            let isCurrent = folder.url.standardizedFileURL.path == currentFolderURL.standardizedFileURL.path
+                            let isInvalid = isInvalidFolder(folder.url)
+                            let isSelected = selectedDestinationURL?.standardizedFileURL.path == folder.url.standardizedFileURL.path
+                            
+                            Button {
+                                if !isCurrent && !isInvalid {
+                                    selectedDestinationURL = folder.url
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    if folder.depth > 0 {
+                                        Spacer()
+                                            .frame(width: CGFloat(folder.depth * 18))
+                                    }
+                                    
+                                    Image(systemName: folder.isRoot ? "externaldrive.fill" : "folder.fill")
+                                        .foregroundStyle(folder.isRoot ? .indigo : .blue)
+                                        .font(.body)
+                                    
+                                    Text(folder.name)
+                                        .foregroundStyle(isInvalid ? .secondary : .primary)
+                                        .fontWeight(folder.isRoot ? .semibold : .regular)
+                                    
+                                    Spacer()
+                                    
+                                    if isCurrent {
+                                        Text("Current")
+                                            .font(.caption2)
+                                            .fontWeight(.medium)
+                                            .foregroundStyle(.secondary)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.secondary.opacity(0.15))
+                                            .clipShape(Capsule())
+                                    } else if isInvalid {
+                                        Text("Invalid")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    } else if isSelected {
+                                        Image(systemName: "checkmark")
+                                            .foregroundStyle(Color.accentColor)
+                                            .fontWeight(.semibold)
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isCurrent || isInvalid)
+                        }
+                    } header: {
+                        Text("Select Destination Folder")
+                    } footer: {
+                        Text("Select where you want to move '\(item.name)'.")
+                    }
+                }
+                
+                // Bottom Move Action Bar
+                VStack(spacing: 8) {
+                    Button {
+                        if let selected = selectedDestinationURL {
+                            onMove(selected)
+                        }
+                    } label: {
+                        Text(moveButtonTitle)
+                            .font(.body)
+                            .fontWeight(.semibold)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selectedDestinationURL == nil || isCurrentLocation)
+                }
+                .padding()
+                .background(Color.secondary.opacity(0.05))
+            }
+            .navigationTitle("Move Item")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+                
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        newFolderName = ""
+                        showNewFolderDialog = true
+                    } label: {
+                        Label("New Folder", systemImage: "folder.badge.plus")
+                    }
+                }
+            }
+            .alert("New Folder", isPresented: $showNewFolderDialog) {
+                TextField("Folder Name", text: $newFolderName)
+                Button("Cancel", role: .cancel) { }
+                Button("Create") {
+                    createNewFolder()
+                }
+            } message: {
+                Text("Create a new folder in '\(activeTargetFolderForNewFolder.standardizedFileURL.path == FileManagerService.shared.documentsDirectory.standardizedFileURL.path ? "Mini C" : activeTargetFolderForNewFolder.lastPathComponent)'.")
+            }
+            .alert("Error", isPresented: $showAlertError) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(alertErrorMessage ?? "An unknown error occurred.")
+            }
+            .onAppear {
+                reloadFolders()
+            }
+        }
+    }
+    
+    private var activeTargetFolderForNewFolder: URL {
+        if let selected = selectedDestinationURL, !isInvalidFolder(selected) {
+            return selected
+        }
+        return currentFolderURL
+    }
+    
+    private func isInvalidFolder(_ url: URL) -> Bool {
+        guard item.isDirectory else { return false }
+        let targetPath = url.standardizedFileURL.path
+        let itemPath = item.url.standardizedFileURL.path
+        return targetPath == itemPath || targetPath.hasPrefix(itemPath + "/")
+    }
+    
+    private func reloadFolders() {
+        availableFolders = FileManagerService.shared.allFolders()
+        // Pre-select parent folder or root if moving out
+        if selectedDestinationURL == nil {
+            if currentFolderURL.standardizedFileURL.path != FileManagerService.shared.documentsDirectory.standardizedFileURL.path {
+                selectedDestinationURL = currentFolderURL.deletingLastPathComponent()
+            }
+        }
+    }
+    
+    private func createNewFolder() {
+        do {
+            let newURL = try FileManagerService.shared.createFolder(name: newFolderName, in: activeTargetFolderForNewFolder)
+            reloadFolders()
+            selectedDestinationURL = newURL
+        } catch {
+            alertErrorMessage = error.localizedDescription
+            showAlertError = true
+        }
     }
 }
 

@@ -7,6 +7,9 @@ final class FileManagerService {
     
     let fileManager = FileManager.default
     
+    /// Incremented on file/folder operations to notify observing views to reload directory contents.
+    var directoryChangeCount: Int = 0
+    
     /// The root accessible Documents directory for the app.
     var documentsDirectory: URL {
         fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -74,6 +77,7 @@ final class FileManagerService {
         
         let initialContent = content ?? type.defaultTemplate
         try initialContent.write(to: targetURL, atomically: true, encoding: .utf8)
+        directoryChangeCount += 1
         return targetURL
     }
     
@@ -89,6 +93,7 @@ final class FileManagerService {
         }
         
         try fileManager.createDirectory(at: targetURL, withIntermediateDirectories: true, attributes: nil)
+        directoryChangeCount += 1
         return targetURL
     }
     
@@ -127,12 +132,50 @@ final class FileManagerService {
         }
         
         try fileManager.moveItem(at: url, to: destinationURL)
+        directoryChangeCount += 1
+        return destinationURL
+    }
+    
+    /// Moves a file or folder into a destination folder directory.
+    @discardableResult
+    func moveItem(at sourceURL: URL, to destinationFolderURL: URL) throws -> URL {
+        let sourceStandardized = sourceURL.standardizedFileURL
+        let destFolderStandardized = destinationFolderURL.standardizedFileURL
+        
+        guard fileManager.fileExists(atPath: sourceStandardized.path) else {
+            throw NSError(domain: "FileManagerService", code: 5, userInfo: [NSLocalizedDescriptionKey: "The item to move does not exist."])
+        }
+        
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: destFolderStandardized.path, isDirectory: &isDir), isDir.boolValue else {
+            throw NSError(domain: "FileManagerService", code: 6, userInfo: [NSLocalizedDescriptionKey: "Destination is not a valid folder."])
+        }
+        
+        let fileName = sourceStandardized.lastPathComponent
+        let currentParent = sourceStandardized.deletingLastPathComponent().standardizedFileURL
+        
+        if currentParent.path == destFolderStandardized.path {
+            throw NSError(domain: "FileManagerService", code: 7, userInfo: [NSLocalizedDescriptionKey: "'\(fileName)' is already in '\(destinationFolderURL.lastPathComponent)'."])
+        }
+        
+        if sourceStandardized.path == destFolderStandardized.path || destFolderStandardized.path.hasPrefix(sourceStandardized.path + "/") {
+            throw NSError(domain: "FileManagerService", code: 8, userInfo: [NSLocalizedDescriptionKey: "Cannot move a folder into itself or one of its subfolders."])
+        }
+        
+        let destinationURL = destFolderStandardized.appendingPathComponent(fileName)
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            throw NSError(domain: "FileManagerService", code: 9, userInfo: [NSLocalizedDescriptionKey: "An item named '\(fileName)' already exists in '\(destinationFolderURL.lastPathComponent)'."])
+        }
+        
+        try fileManager.moveItem(at: sourceStandardized, to: destinationURL)
+        directoryChangeCount += 1
         return destinationURL
     }
     
     /// Deletes a file or folder item.
     func deleteItem(at url: URL) throws {
         try fileManager.removeItem(at: url)
+        directoryChangeCount += 1
     }
     
     /// Duplicates a file or folder item.
@@ -153,7 +196,35 @@ final class FileManagerService {
         }
         
         try fileManager.copyItem(at: url, to: destinationURL)
+        directoryChangeCount += 1
         return destinationURL
+    }
+    
+    /// Returns all folders in the documents directory hierarchically for folder picker navigation.
+    func allFolders() -> [FolderItemInfo] {
+        let root = documentsDirectory.standardizedFileURL
+        var folders: [FolderItemInfo] = [
+            FolderItemInfo(url: root, name: "Mini C", relativePath: "", depth: 0, isRoot: true)
+        ]
+        
+        func scanSubfolders(in folderURL: URL, depth: Int, relativePrefix: String) {
+            let subItems = contentsOfDirectory(at: folderURL).filter { $0.isDirectory }
+            for item in subItems {
+                let itemURL = item.url.standardizedFileURL
+                let relPath = relativePrefix.isEmpty ? item.name : "\(relativePrefix)/\(item.name)"
+                folders.append(FolderItemInfo(
+                    url: itemURL,
+                    name: item.name,
+                    relativePath: relPath,
+                    depth: depth,
+                    isRoot: false
+                ))
+                scanSubfolders(in: itemURL, depth: depth + 1, relativePrefix: relPath)
+            }
+        }
+        
+        scanSubfolders(in: root, depth: 1, relativePrefix: "")
+        return folders
     }
     
     /// Creates default sample starter files on first application launch if documents directory is empty.
