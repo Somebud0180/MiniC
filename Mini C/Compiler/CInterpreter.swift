@@ -145,7 +145,11 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         funcScope.define(name: "__func__", address: funcNameAddr, type: .array(.char, name.utf8.count + 1), isConst: true)
         funcScope.define(name: "__FUNCTION__", address: funcNameAddr, type: .array(.char, name.utf8.count + 1), isConst: true)
         for (i, param) in funcDef.params.enumerated() {
-            let val = i < args.count ? args[i] : .int(0)
+            var val = i < args.count ? args[i] : .int(0)
+            if case .pointer = param.type, case .string(let str) = val {
+                let cAddr = memory.allocateCString(str)
+                val = .pointer(cAddr)
+            }
             let addr = memory.allocate(value: val)
             if case .structInstance(let sid) = val {
                 memory.addressToStructId[addr] = sid
@@ -426,6 +430,11 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                         }
                     }
                 }
+            }
+            
+            if case .pointer = type, case .string(let str) = initialValue {
+                let cAddr = memory.allocateCString(str)
+                initialValue = .pointer(cAddr)
             }
             
             let addr = memory.allocate(value: initialValue, alignment: type.abiAlignment, size: type.abiSize)
@@ -1037,6 +1046,12 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             if case .string(let s1) = left, case .string(let s2) = right {
                 return .bool(s1 == s2)
             }
+            if case .string = left, (right == .null || right.asInt == 0) {
+                return .bool(false)
+            }
+            if case .string = right, (left == .null || left.asInt == 0) {
+                return .bool(false)
+            }
             if left.isDouble || right.isDouble {
                 return .bool(left.asDouble == right.asDouble)
             }
@@ -1054,6 +1069,12 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             }
             if case .string(let s1) = left, case .string(let s2) = right {
                 return .bool(s1 != s2)
+            }
+            if case .string = left, (right == .null || right.asInt == 0) {
+                return .bool(true)
+            }
+            if case .string = right, (left == .null || left.asInt == 0) {
+                return .bool(true)
             }
             if left.isDouble || right.isDouble {
                 return .bool(left.asDouble != right.asDouble)
@@ -1269,9 +1290,13 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             throw CRuntimeError("Cannot assign to r-value", location: location)
         }
         
-        let finalVal: CValue
+        var finalVal: CValue
         if op == .assign {
             finalVal = value
+            if case .identifier(let name, _, _) = target, let varType = currentScope.resolveType(name: name), case .pointer = varType, case .string(let str) = finalVal {
+                let cAddr = memory.allocateCString(str)
+                finalVal = .pointer(cAddr)
+            }
         } else {
             let cur = memory.read(address: addr)
             let binOp: BinaryOperator
@@ -1564,7 +1589,11 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                     funcScope.define(name: param.name, address: addr, type: param.type)
                 }
             } else {
-                let val = i < args.count ? args[i] : .int(0)
+                var val = i < args.count ? args[i] : .int(0)
+                if case .pointer = param.type, case .string(let str) = val {
+                    let cAddr = memory.allocateCString(str)
+                    val = .pointer(cAddr)
+                }
                 let addr = memory.allocate(value: val)
                 if case .structInstance(let sid) = val {
                     memory.addressToStructId[addr] = sid

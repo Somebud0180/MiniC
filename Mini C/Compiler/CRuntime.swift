@@ -48,7 +48,7 @@ public enum CValue: Equatable, Sendable, CustomStringConvertible {
         case .char(let v): return Int64(v)
         case .bool(let v): return v ? 1 : 0
         case .pointer(let v): return Int64(v)
-        case .string(let s): return Int64(s) ?? 0
+        case .string(let s): return Int64(s) ?? (s.isEmpty ? 0x2000 : 0x2000 + Int64(abs(s.hashValue & 0xFFFF)))
         case .vectorIterator(_, let index): return Int64(index)
         case .closure(let id): return Int64(id)
         case .null, .void, .structInstance, .vectorInstance, .mapInstance, .smartPointer, .mapIterator: return 0
@@ -89,7 +89,7 @@ public enum CValue: Equatable, Sendable, CustomStringConvertible {
         case .char(let v): return v != 0
         case .bool(let v): return v
         case .pointer(let v): return v != 0
-        case .string(let s): return !s.isEmpty
+        case .string: return true
         case .structInstance, .vectorInstance, .mapInstance, .smartPointer, .vectorIterator, .closure: return true
         case .mapIterator(_, _, let isEnd): return !isEnd
         case .null, .void: return false
