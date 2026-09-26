@@ -4,8 +4,8 @@
 Mini C is a C/C++ IDE made for iOS and iPadOS. Featuring a simplified IDE that lets you code and run your programs with ease.
 
 ### Features
-- C99 Standard Compiler (WIP)
-- C++11 Standard Compiler
+- C99 Compliant Compiler
+- C++11 Compliant Compiler
 - Simple Coding Interface
 - Quick Keys
 - Smart Code Structuring
