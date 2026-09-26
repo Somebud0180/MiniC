@@ -250,69 +250,86 @@ public final class CParser {
     
     private func parseType() throws -> CType {
         _ = match(.kwConst)
-        _ = match(.kwUnsigned) || match(.kwSigned)
+        let isUnsigned = match(.kwUnsigned)
+        let isSigned = match(.kwSigned)
         
-        var baseType: CType = .int
-        let token = advance()
+        var baseType: CType = isUnsigned ? .unsignedInt : .int
         
-        switch token.type {
-        case .kwInt: baseType = .int
-        case .kwFloat: baseType = .float
-        case .kwDouble: baseType = .double
-        case .kwChar: baseType = .char
-        case .kwVoid: baseType = .void
-        case .kwBool: baseType = .bool
-        case .kwLong:
-            if match(.kwLong) { baseType = .long }
-            else if match(.kwDouble) { baseType = .double }
-            else if match(.kwInt) { baseType = .long }
-            else { baseType = .long }
-        case .kwShort:
-            _ = match(.kwInt)
-            baseType = .short
-        case .kwAuto:
-            baseType = .int // auto defaults to int for typing
-        case .kwStruct, .kwClass:
-            guard case .identifier(let name) = advance().type else {
-                throw CCompilerError("Expected struct name", location: token.location)
-            }
-            baseType = .structType(name)
-        case .identifier(let name):
-            if name == "std" && match(.colonColon) {
-                // std::string or std::vector<T>
-                guard case .identifier(let stdSub) = advance().type else {
-                    throw CCompilerError("Expected type name after std::", location: token.location)
-                }
-                if stdSub == "string" {
-                    baseType = .stringType
-                } else if stdSub == "vector" {
-                    baseType = try parseVectorType()
-                } else if ["cout", "cin", "endl", "cerr"].contains(stdSub) {
-                    throw CCompilerError("'std::\(stdSub)' is not a type", location: token.location)
+        if !isAtEnd && !isTypeBeginning() && (isUnsigned || isSigned) {
+            baseType = isUnsigned ? .unsignedInt : .int
+        } else {
+            let token = advance()
+            
+            switch token.type {
+            case .kwInt:
+                baseType = isUnsigned ? .unsignedInt : .int
+            case .kwFloat:
+                baseType = .float
+            case .kwDouble:
+                baseType = .double
+            case .kwChar:
+                baseType = isUnsigned ? .unsignedChar : (isSigned ? .signedChar : .char)
+            case .kwVoid:
+                baseType = .void
+            case .kwBool:
+                baseType = .bool
+            case .kwLong:
+                if match(.kwLong) {
+                    _ = match(.kwInt)
+                    baseType = isUnsigned ? .unsignedLongLong : .longLong
+                } else if match(.kwDouble) {
+                    baseType = .double
+                } else if match(.kwInt) {
+                    baseType = isUnsigned ? .unsignedLong : .long
                 } else {
-                    baseType = .custom("std::\(stdSub)")
+                    baseType = isUnsigned ? .unsignedLong : .long
                 }
-            } else if name == "string" {
-                baseType = .stringType
-            } else if name == "vector" {
-                baseType = try parseVectorType()
-            } else if structNames.contains(name) {
+            case .kwShort:
+                _ = match(.kwInt)
+                baseType = isUnsigned ? .unsignedShort : .short
+            case .kwAuto:
+                baseType = .int
+            case .kwStruct, .kwClass:
+                guard case .identifier(let name) = advance().type else {
+                    throw CCompilerError("Expected struct name", location: token.location)
+                }
                 baseType = .structType(name)
-            } else {
-                baseType = .custom(name)
+            case .identifier(let name):
+                if name == "std" && match(.colonColon) {
+                    guard case .identifier(let stdSub) = advance().type else {
+                        throw CCompilerError("Expected type name after std::", location: token.location)
+                    }
+                    if stdSub == "string" {
+                        baseType = .stringType
+                    } else if stdSub == "vector" {
+                        baseType = try parseVectorType()
+                    } else if ["cout", "cin", "endl", "cerr"].contains(stdSub) {
+                        throw CCompilerError("'std::\(stdSub)' is not a type", location: token.location)
+                    } else {
+                        baseType = .custom("std::\(stdSub)")
+                    }
+                } else if name == "string" {
+                    baseType = .stringType
+                } else if name == "vector" {
+                    baseType = try parseVectorType()
+                } else if structNames.contains(name) {
+                    baseType = .structType(name)
+                } else {
+                    baseType = .custom(name)
+                }
+            default:
+                throw CCompilerError("Expected type name", location: token.location)
             }
-        default:
-            throw CCompilerError("Expected type name", location: token.location)
         }
         
-        // Pointers and references
         while true {
             if match(.star) {
                 baseType = .pointer(baseType)
+            } else if match(.logicalAnd) {
+                baseType = .rvalueReference(baseType)
             } else if match(.ampersand) {
                 baseType = .reference(baseType)
             } else if match(.kwConst) {
-                // const pointer
                 continue
             } else {
                 break

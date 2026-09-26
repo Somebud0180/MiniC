@@ -148,6 +148,8 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                 functions[name] = (params: params, body: body)
             case .structDecl(let name, let fields, _):
                 structs[name] = fields
+                let layout = RecordLayoutEngine.computeLayout(fields: fields, isUnion: false, structLayouts: memory.structLayouts)
+                memory.structLayouts[name] = layout
             case .usingNamespace:
                 break
             case .variableDecl:
@@ -209,20 +211,27 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                 try await executeStatement(s)
             }
             
-        case .variableDecl(let type, let name, let initExpr, _, _):
+        case .variableDecl(let type, let name, let initExpr, let isConst, let location):
             var initialValue: CValue = .int(0)
             if let initExpr = initExpr {
                 if case .initializerList(let items, _) = initExpr {
                     // Array initialization
-                    let addr = memory.allocateBlock(count: max(items.count, 1))
+                    let elemSize = type.pointeeType?.abiSize ?? 8
+                    let addr = memory.allocateBlock(count: max(items.count, 1), elementSize: elemSize)
                     for (i, it) in items.enumerated() {
-                        let v = try await evaluate(it)
-                        memory.write(address: addr + i * 8, value: v)
+                        var v = try await evaluate(it)
+                        if let elemType = type.pointeeType, elemType.isInteger {
+                            v = CValue.truncate(value: v.asInt, to: elemType)
+                        }
+                        memory.write(address: addr + i * elemSize, value: v)
                     }
-                    currentScope.define(name: name, address: addr)
+                    currentScope.define(name: name, address: addr, type: type, isConst: isConst)
                     return
                 } else {
                     initialValue = try await evaluate(initExpr)
+                    if type.isInteger {
+                        initialValue = CValue.truncate(value: initialValue.asInt, to: type)
+                    }
                 }
             } else {
                 // Default value based on type
@@ -237,12 +246,14 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                     if let fields = structs[sName] {
                         for f in fields { fieldMap[f.name] = .int(0) }
                     }
-                    let sid = memory.createStruct(fields: fieldMap)
-                    initialValue = .structInstance(sid)
-                case .array(_, let size):
+                    let (_, baseAddr) = memory.createStructInstance(name: sName, fields: fieldMap)
+                    currentScope.define(name: name, address: baseAddr, type: type, isConst: isConst)
+                    return
+                case .array(let elem, let size):
                     let count = size ?? 10
-                    let addr = memory.allocateBlock(count: count)
-                    currentScope.define(name: name, address: addr)
+                    let elemSize = elem.abiSize
+                    let addr = memory.allocateBlock(count: count, elementSize: elemSize)
+                    currentScope.define(name: name, address: addr, type: type, isConst: isConst)
                     return
                 default:
                     initialValue = .int(0)
@@ -251,16 +262,19 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             
             // Check if variable is a C++ reference: int& ref = target;
             if case .reference = type {
-                if case .identifier(let targetName, _, _) = initExpr {
-                    if let targetAddr = currentScope.resolveAddress(name: targetName) {
-                        currentScope.defineReference(name: name, address: targetAddr)
-                        return
-                    }
+                if let targetAddr = resolveLValueAddress(initExpr ?? .identifier(name, namespace: nil, location)) {
+                    currentScope.defineReference(name: name, address: targetAddr, type: type)
+                    return
                 }
             }
             
-            let addr = memory.allocate(value: initialValue)
-            currentScope.define(name: name, address: addr)
+            let addr = memory.allocate(value: initialValue, alignment: type.abiAlignment, size: type.abiSize)
+            currentScope.define(name: name, address: addr, type: type, isConst: isConst)
+            if case .pointer(let inner) = type {
+                if case .pointer(let pAddr) = initialValue {
+                    memory.pointerPointeeSizes[pAddr] = inner.abiSize
+                }
+            }
             
         case .expr(let expr, _):
             _ = try await evaluate(expr)
@@ -375,6 +389,8 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             
         case .structDecl(let name, let fields, _):
             structs[name] = fields
+            let layout = RecordLayoutEngine.computeLayout(fields: fields, isUnion: false, structLayouts: memory.structLayouts)
+            memory.structLayouts[name] = layout
             
         case .funcDecl(_, let name, let params, let body, _):
             functions[name] = (params: params, body: body)
@@ -508,7 +524,8 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             
             switch base {
             case .pointer(let baseAddr):
-                return memory.read(address: baseAddr + Int(index) * 8)
+                let pointeeSize = memory.pointerPointeeSizes[baseAddr] ?? 8
+                return memory.read(address: baseAddr + Int(index) * pointeeSize)
             case .vectorInstance(let vid):
                 return memory.vectorGet(id: vid, index: Int(index))
             case .string(let s):
@@ -523,7 +540,16 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             var objVal = try await evaluate(objExpr)
             if isArrow {
                 if case .pointer(let addr) = objVal {
-                    objVal = memory.read(address: addr)
+                    let memVal = memory.read(address: addr)
+                    if case .structInstance = memVal {
+                        objVal = memVal
+                    } else {
+                        for layout in memory.structLayouts.values {
+                            if let m = layout.memberMap[member] {
+                                return memory.read(address: addr + m.offset)
+                            }
+                        }
+                    }
                 }
             }
             
@@ -547,24 +573,34 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             
         case .cast(let targetType, let expr, _):
             let val = try await evaluate(expr)
+            if targetType.isInteger {
+                return CValue.truncate(value: val.asInt, to: targetType)
+            }
             switch targetType {
-            case .int, .short, .long: return .int(val.asInt)
             case .float, .double: return .double(val.asDouble)
-            case .char: return .char(UInt8(val.asInt & 0xFF))
+            case .char, .signedChar, .unsignedChar: return .char(UInt8(val.asInt & 0xFF))
             case .bool: return .bool(val.isTruthy)
+            case .pointer(let inner):
+                if case .pointer(let pAddr) = val {
+                    memory.pointerPointeeSizes[pAddr] = inner.abiSize
+                }
+                return val
             default: return val
             }
             
         case .sizeofType(let type, _):
-            switch type {
-            case .char, .bool: return .int(1)
-            case .short: return .int(2)
-            case .int, .float: return .int(4)
-            case .double, .long, .pointer: return .int(8)
-            default: return .int(8)
+            if case .structType(let sName) = type, let layout = memory.structLayouts[sName] {
+                return .int(Int64(layout.size))
             }
+            return .int(Int64(type.abiSize))
             
         case .sizeofExpr(let expr, _):
+            if case .identifier(let name, _, _) = expr, let type = currentScope.resolveType(name: name) {
+                if case .structType(let sName) = type, let layout = memory.structLayouts[sName] {
+                    return .int(Int64(layout.size))
+                }
+                return .int(Int64(type.abiSize))
+            }
             let val = try await evaluate(expr)
             switch val {
             case .char, .bool: return .int(1)
@@ -589,9 +625,14 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             if case .string(let s2) = right {
                 return .string(left.description + s2)
             }
-            // Pointer arithmetic: ptr + int
+            // Pointer arithmetic: ptr + int (scaling by pointee size)
             if case .pointer(let addr) = left {
-                return .pointer(addr + Int(right.asInt) * 8)
+                let pointeeSize = memory.pointerPointeeSizes[addr] ?? 1
+                return .pointer(addr + Int(right.asInt) * pointeeSize)
+            }
+            if case .pointer(let addr) = right {
+                let pointeeSize = memory.pointerPointeeSizes[addr] ?? 1
+                return .pointer(addr + Int(left.asInt) * pointeeSize)
             }
             if left.isDouble || right.isDouble {
                 return .double(left.asDouble + right.asDouble)
@@ -599,12 +640,14 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             return .int(left.asInt + right.asInt)
             
         case .subtract:
-            // Pointer difference: ptr - ptr
+            // Pointer difference: ptr - ptr (scaling by pointee size)
             if case .pointer(let a1) = left, case .pointer(let a2) = right {
-                return .int(Int64((a1 - a2) / 8))
+                let pointeeSize = memory.pointerPointeeSizes[a1] ?? memory.pointerPointeeSizes[a2] ?? 1
+                return .int(Int64((a1 - a2) / max(pointeeSize, 1)))
             }
             if case .pointer(let addr) = left {
-                return .pointer(addr - Int(right.asInt) * 8)
+                let pointeeSize = memory.pointerPointeeSizes[addr] ?? 1
+                return .pointer(addr - Int(right.asInt) * pointeeSize)
             }
             if left.isDouble || right.isDouble {
                 return .double(left.asDouble - right.asDouble)
@@ -711,10 +754,13 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             }
             return memory.read(address: addr)
         case .addressOf:
-            if let addr = resolveLValueAddress(operand) {
-                return .pointer(addr)
+            guard let addr = resolveLValueAddress(operand) else {
+                throw CRuntimeError("lvalue required as unary '&' operand", location: location)
             }
-            throw CRuntimeError("Cannot take address of r-value", location: location)
+            if case .identifier(let name, _, _) = operand, let t = currentScope.resolveType(name: name) {
+                memory.pointerPointeeSizes[addr] = t.abiSize
+            }
+            return .pointer(addr)
         case .preInc:
             guard let addr = resolveLValueAddress(operand) else {
                 throw CRuntimeError("Cannot increment non-variable", location: location)
@@ -753,11 +799,29 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
     // MARK: - Assignment Execution
     
     private func executeAssignment(op: AssignmentOperator, target: CExpr, value: CValue, location: SourceLocation) async throws -> CValue {
+        if case .identifier(let name, _, _) = target {
+            if currentScope.isConst(name: name) {
+                throw CRuntimeError("Cannot assign to variable '\(name)' with const-qualified type", location: location)
+            }
+        }
+        
         // Struct member assignment
         if case .memberAccess(let objExpr, let member, let isArrow, _) = target {
             var objVal = try await evaluate(objExpr)
             if isArrow {
-                if case .pointer(let addr) = objVal { objVal = memory.read(address: addr) }
+                if case .pointer(let addr) = objVal {
+                    let memVal = memory.read(address: addr)
+                    if case .structInstance = memVal {
+                        objVal = memVal
+                    } else {
+                        for layout in memory.structLayouts.values {
+                            if let m = layout.memberMap[member] {
+                                memory.write(address: addr + m.offset, value: value)
+                                return value
+                            }
+                        }
+                    }
+                }
             }
             if case .structInstance(let sid) = objVal {
                 memory.setStructField(id: sid, name: member, value: value)
@@ -770,7 +834,8 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             let base = try await evaluate(arrExpr)
             let idx = try await evaluate(idxExpr).asInt
             if case .pointer(let addr) = base {
-                memory.write(address: addr + Int(idx) * 8, value: value)
+                let pointeeSize = memory.pointerPointeeSizes[addr] ?? 8
+                memory.write(address: addr + Int(idx) * pointeeSize, value: value)
                 return value
             } else if case .vectorInstance(let vid) = base {
                 memory.vectorSet(id: vid, index: Int(idx), value: value)
@@ -899,7 +964,6 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         case .identifier(let name, _, _):
             return currentScope.resolveAddress(name: name)
         case .unary(.dereference, let operand, _):
-            // *ptr resolves to ptr's pointer value
             if case .identifier(let name, _, _) = operand,
                let addr = currentScope.resolveAddress(name: name) {
                 let ptrVal = memory.read(address: addr)
@@ -911,14 +975,32 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         case .subscriptAccess(let arrExpr, let idxExpr, _):
             if let baseAddr = resolveLValueAddress(arrExpr) {
                 let ptrVal = memory.read(address: baseAddr)
-                let actualBase: Int
-                if case .pointer(let addr) = ptrVal {
-                    actualBase = addr
-                } else {
-                    actualBase = baseAddr
-                }
+                let actualBase: Int = ptrVal.isPointer ? Int(ptrVal.asInt) : baseAddr
+                let step = memory.pointerPointeeSizes[actualBase] ?? memory.pointerPointeeSizes[baseAddr] ?? 8
                 if case .literalInt(let idx, _) = idxExpr {
-                    return actualBase + Int(idx) * 8
+                    return actualBase + Int(idx) * step
+                }
+            }
+            return nil
+        case .memberAccess(let objExpr, let member, let isArrow, _):
+            if isArrow {
+                if let ptrAddr = resolveLValueAddress(objExpr) {
+                    let ptrVal = memory.read(address: ptrAddr)
+                    if case .pointer(let structBase) = ptrVal {
+                        for layout in memory.structLayouts.values {
+                            if let mem = layout.memberMap[member] {
+                                return structBase + mem.offset
+                            }
+                        }
+                    }
+                }
+            } else {
+                if let structBase = resolveLValueAddress(objExpr) {
+                    for layout in memory.structLayouts.values {
+                        if let mem = layout.memberMap[member] {
+                            return structBase + mem.offset
+                        }
+                    }
                 }
             }
             return nil

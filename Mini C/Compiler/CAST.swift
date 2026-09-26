@@ -1,28 +1,138 @@
 import Foundation
 
+// MARK: - Type Qualifiers
+
+public struct TypeQualifiers: OptionSet, Sendable {
+    public let rawValue: UInt8
+    public init(rawValue: UInt8) { self.rawValue = rawValue }
+    
+    public static let const    = TypeQualifiers(rawValue: 1 << 0)
+    public static let volatile = TypeQualifiers(rawValue: 1 << 1)
+}
+
 // MARK: - Types
 
 public indirect enum CType: Equatable, Sendable {
+    // Basic integer types
     case int
+    case unsignedInt
     case short
+    case unsignedShort
     case long
+    case unsignedLong
+    case longLong
+    case unsignedLongLong
+    
+    // Floating point types
     case float
     case double
+    
+    // Character and Boolean types
     case char
+    case signedChar
+    case unsignedChar
     case bool
     case void
+    
+    // Derived types
     case pointer(CType)
     case reference(CType)
+    case rvalueReference(CType)
     case array(CType, Int?)
+    
+    // User-defined / Composite
     case structType(String)
+    case unionType(String)
     case vectorType(CType)
     case stringType
     case custom(String)
     
     public var isNumeric: Bool {
         switch self {
-        case .int, .short, .long, .float, .double, .char, .bool: return true
-        default: return false
+        case .int, .unsignedInt, .short, .unsignedShort,
+             .long, .unsignedLong, .longLong, .unsignedLongLong,
+             .float, .double, .char, .signedChar, .unsignedChar, .bool:
+            return true
+        default:
+            return false
+        }
+    }
+    
+    public var isInteger: Bool {
+        switch self {
+        case .int, .unsignedInt, .short, .unsignedShort,
+             .long, .unsignedLong, .longLong, .unsignedLongLong,
+             .char, .signedChar, .unsignedChar, .bool:
+            return true
+        default:
+            return false
+        }
+    }
+    
+    public var isFloatingPoint: Bool {
+        return self == .float || self == .double
+    }
+    
+    public var isSigned: Bool {
+        switch self {
+        case .unsignedInt, .unsignedShort, .unsignedLong, .unsignedLongLong, .unsignedChar, .bool:
+            return false
+        default:
+            return true
+        }
+    }
+    
+    public var integerRank: Int {
+        switch self {
+        case .bool: return 1
+        case .char, .signedChar, .unsignedChar: return 2
+        case .short, .unsignedShort: return 3
+        case .int, .unsignedInt: return 4
+        case .long, .unsignedLong: return 5
+        case .longLong, .unsignedLongLong: return 6
+        default: return 0
+        }
+    }
+    
+    /// Standard LP64 ABI size in bytes (System V AMD64 / ARM64 AAPCS)
+    public var abiSize: Int {
+        switch self {
+        case .bool, .char, .signedChar, .unsignedChar:
+            return 1
+        case .short, .unsignedShort:
+            return 2
+        case .int, .unsignedInt, .float:
+            return 4
+        case .long, .unsignedLong, .longLong, .unsignedLongLong, .double:
+            return 8
+        case .pointer, .reference, .rvalueReference:
+            return 8
+        case .array(let elem, let count):
+            return (count ?? 1) * elem.abiSize
+        case .void:
+            return 0
+        default:
+            return 8
+        }
+    }
+    
+    /// Standard LP64 ABI alignment in bytes
+    public var abiAlignment: Int {
+        switch self {
+        case .bool, .char, .signedChar, .unsignedChar:
+            return 1
+        case .short, .unsignedShort:
+            return 2
+        case .int, .unsignedInt, .float:
+            return 4
+        case .long, .unsignedLong, .longLong, .unsignedLongLong, .double:
+            return 8
+        case .pointer, .reference, .rvalueReference:
+            return 8
+        case .array(let elem, _):
+            return elem.abiAlignment
+        default:
+            return 8
         }
     }
     
@@ -30,6 +140,181 @@ public indirect enum CType: Equatable, Sendable {
         if case .pointer = self { return true }
         return false
     }
+    
+    public var isReference: Bool {
+        switch self {
+        case .reference, .rvalueReference: return true
+        default: return false
+        }
+    }
+    
+    public var pointeeType: CType? {
+        switch self {
+        case .pointer(let p), .reference(let p), .rvalueReference(let p):
+            return p
+        case .array(let elem, _):
+            return elem
+        default:
+            return nil
+        }
+    }
+}
+
+// MARK: - Type Promotion & Conversion Engine (ISO C99 §6.3.1)
+
+public struct TypePromotionEngine {
+    /// ISO C99 §6.3.1.1: Integer Promotion
+    public static func promoteInteger(_ type: CType) -> CType {
+        guard type.isInteger else { return type }
+        if type.integerRank < CType.int.integerRank {
+            return .int
+        }
+        return type
+    }
+    
+    /// ISO C99 §6.3.1.8 / C++17 [expr.type]: Usual Arithmetic Conversions
+    public static func usualArithmeticConversions(lhs: CType, rhs: CType) -> CType {
+        // 1. If either operand is double, convert to double
+        if lhs == .double || rhs == .double { return .double }
+        if lhs == .float || rhs == .float { return .float }
+        
+        // 2. Both operands are integers: perform integer promotion
+        let pLhs = promoteInteger(lhs)
+        let pRhs = promoteInteger(rhs)
+        
+        if pLhs == pRhs { return pLhs }
+        
+        let lRank = pLhs.integerRank
+        let rRank = pRhs.integerRank
+        let lSigned = pLhs.isSigned
+        let rSigned = pRhs.isSigned
+        
+        // Both have same signedness
+        if lSigned == rSigned {
+            return lRank >= rRank ? pLhs : pRhs
+        }
+        
+        // Operands have different signedness
+        let (uType, uRank) = lSigned ? (pRhs, rRank) : (pLhs, lRank)
+        let (sType, sRank) = lSigned ? (pLhs, lRank) : (pRhs, rRank)
+        
+        // If unsigned operand has rank >= signed operand, convert signed to unsigned
+        if uRank >= sRank {
+            return uType
+        }
+        
+        // Signed operand has strictly greater rank: in LP64, signed type represents all values
+        return sType
+    }
+}
+
+// MARK: - Standard ABI Record Layout Engine
+
+public struct StructMemberLayout: Sendable {
+    public let name: String
+    public let type: CType
+    public let offset: Int
+    public let size: Int
+    public let alignment: Int
+    
+    public init(name: String, type: CType, offset: Int, size: Int, alignment: Int) {
+        self.name = name
+        self.type = type
+        self.offset = offset
+        self.size = size
+        self.alignment = alignment
+    }
+}
+
+public struct RecordLayout: Sendable {
+    public let size: Int
+    public let alignment: Int
+    public let members: [StructMemberLayout]
+    public let memberMap: [String: StructMemberLayout]
+    
+    public init(size: Int, alignment: Int, members: [StructMemberLayout]) {
+        self.size = size
+        self.alignment = alignment
+        self.members = members
+        var map: [String: StructMemberLayout] = [:]
+        for m in members {
+            map[m.name] = m
+        }
+        self.memberMap = map
+    }
+}
+
+public final class RecordLayoutEngine {
+    public static func alignTo(_ offset: Int, _ alignment: Int) -> Int {
+        guard alignment > 0 else { return offset }
+        let remainder = offset % alignment
+        return remainder == 0 ? offset : offset + (alignment - remainder)
+    }
+    
+    public static func computeLayout(
+        fields: [(type: CType, name: String)],
+        isUnion: Bool = false,
+        structLayouts: [String: RecordLayout] = [:]
+    ) -> RecordLayout {
+        var currentOffset = 0
+        var maxAlignment = 1
+        var memberLayouts: [StructMemberLayout] = []
+        var maxMemberSize = 0
+        
+        for (type, name) in fields {
+            let fieldSize: Int
+            let fieldAlign: Int
+            
+            switch type {
+            case .structType(let sName), .unionType(let sName):
+                if let layout = structLayouts[sName] {
+                    fieldSize = layout.size
+                    fieldAlign = layout.alignment
+                } else {
+                    fieldSize = 8
+                    fieldAlign = 8
+                }
+            default:
+                fieldSize = type.abiSize
+                fieldAlign = type.abiAlignment
+            }
+            
+            maxAlignment = max(maxAlignment, fieldAlign)
+            
+            if isUnion {
+                memberLayouts.append(StructMemberLayout(
+                    name: name, type: type, offset: 0, size: fieldSize, alignment: fieldAlign
+                ))
+                maxMemberSize = max(maxMemberSize, fieldSize)
+            } else {
+                currentOffset = alignTo(currentOffset, fieldAlign)
+                memberLayouts.append(StructMemberLayout(
+                    name: name, type: type, offset: currentOffset, size: fieldSize, alignment: fieldAlign
+                ))
+                currentOffset += fieldSize
+            }
+        }
+        
+        let finalSize: Int
+        if isUnion {
+            finalSize = alignTo(maxMemberSize, maxAlignment)
+        } else {
+            finalSize = alignTo(currentOffset, maxAlignment)
+        }
+        
+        return RecordLayout(size: max(finalSize, 1), alignment: maxAlignment, members: memberLayouts)
+    }
+}
+
+// MARK: - Value Categories
+
+public enum ValueCategory: Sendable {
+    case lvalue
+    case xvalue
+    case prvalue
+    
+    public var isGlvalue: Bool { self == .lvalue || self == .xvalue }
+    public var isRvalue: Bool { self == .prvalue || self == .xvalue }
 }
 
 // MARK: - Operators
