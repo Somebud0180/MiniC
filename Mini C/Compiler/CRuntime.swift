@@ -157,8 +157,8 @@ public final class MemoryManager {
     
     public var structLayouts: [String: RecordLayout] = [:]
     private var structs: [Int: [String: CValue]] = [:]
-    public private(set) var structAddresses: [Int: Int] = [:]
-    public private(set) var addressToStructId: [Int: Int] = [:]
+    public var structAddresses: [Int: Int] = [:]
+    public var addressToStructId: [Int: Int] = [:]
     private var addressToMember: [Int: (structId: Int, member: String)] = [:]
     private var nextStructId: Int = 1
     

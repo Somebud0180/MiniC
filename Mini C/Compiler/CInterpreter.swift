@@ -142,11 +142,15 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         
         let funcScope = Scope(parent: globalScope)
         let funcNameAddr = memory.allocateCString(name)
-        funcScope.define(name: "__func__", address: funcNameAddr, type: .pointer(.char))
+        funcScope.define(name: "__func__", address: funcNameAddr, type: .array(.char, name.utf8.count + 1), isConst: true)
+        funcScope.define(name: "__FUNCTION__", address: funcNameAddr, type: .array(.char, name.utf8.count + 1), isConst: true)
         for (i, param) in funcDef.params.enumerated() {
             let val = i < args.count ? args[i] : .int(0)
             let addr = memory.allocate(value: val)
-            funcScope.define(name: param.name, address: addr)
+            if case .structInstance(let sid) = val {
+                memory.addressToStructId[addr] = sid
+            }
+            funcScope.define(name: param.name, address: addr, type: param.type)
         }
         
         let prevScope = currentScope
@@ -801,6 +805,9 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             if case .structInstance(let sid) = objVal {
                 return memory.getStructField(id: sid, name: member)
             }
+            if case .pointer(let baseAddr) = objVal, let sid = memory.addressToStructId[baseAddr] {
+                return memory.getStructField(id: sid, name: member)
+            }
             
             throw CRuntimeError("Cannot access member '\(member)'", location: loc)
             
@@ -831,6 +838,26 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
             return .int(Int64(type.abiSize))
             
         case .sizeofExpr(let expr, _):
+            if case .compoundLiteral(let type, let initExpr, _) = expr {
+                if case .array(let elemType, let count) = type {
+                    let itemsCount: Int
+                    if let count = count {
+                        itemsCount = count
+                    } else if case .initializerList(let items, _) = initExpr {
+                        itemsCount = items.count
+                    } else {
+                        itemsCount = 1
+                    }
+                    return .int(Int64(itemsCount * elemType.abiSize))
+                }
+                if case .structType(let sName) = type, let layout = memory.structLayouts[sName] {
+                    return .int(Int64(layout.size))
+                }
+                if case .unionType(let sName) = type, let layout = memory.structLayouts[sName] {
+                    return .int(Int64(layout.size))
+                }
+                return .int(Int64(type.abiSize))
+            }
             if case .identifier(let name, _, _) = expr {
                 if let vlaSize = currentScope.resolveVLASize(name: name) {
                     return .int(Int64(vlaSize))
@@ -873,8 +900,8 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                         }
                     }
                 }
-                let (_, baseAddr) = memory.createStructInstance(name: sName, fields: fieldMap)
-                return .pointer(baseAddr)
+                let (sid, _) = memory.createStructInstance(name: sName, fields: fieldMap)
+                return .structInstance(sid)
             default:
                 let elemType = type.pointeeType ?? .int
                 let elemSize = elemType.abiSize
@@ -1524,7 +1551,8 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
         
         let funcScope = Scope(parent: globalScope)
         let funcNameAddr = memory.allocateCString(lookupName)
-        funcScope.define(name: "__func__", address: funcNameAddr, type: .pointer(.char))
+        funcScope.define(name: "__func__", address: funcNameAddr, type: .array(.char, lookupName.utf8.count + 1), isConst: true)
+        funcScope.define(name: "__FUNCTION__", address: funcNameAddr, type: .array(.char, lookupName.utf8.count + 1), isConst: true)
         
         for (i, param) in funcDef.params.enumerated() {
             if param.isRef {
@@ -1533,12 +1561,15 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                     funcScope.defineReference(name: param.name, address: argAddr)
                 } else {
                     let addr = memory.allocate(value: i < args.count ? args[i] : .int(0))
-                    funcScope.define(name: param.name, address: addr)
+                    funcScope.define(name: param.name, address: addr, type: param.type)
                 }
             } else {
                 let val = i < args.count ? args[i] : .int(0)
                 let addr = memory.allocate(value: val)
-                funcScope.define(name: param.name, address: addr)
+                if case .structInstance(let sid) = val {
+                    memory.addressToStructId[addr] = sid
+                }
+                funcScope.define(name: param.name, address: addr, type: param.type)
             }
         }
         

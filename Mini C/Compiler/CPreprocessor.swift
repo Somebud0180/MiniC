@@ -196,6 +196,10 @@ public final class CPreprocessor {
                             if cleanP == "..." {
                                 isVariadic = true
                                 params.append("__VA_ARGS__")
+                            } else if cleanP.hasSuffix("...") {
+                                isVariadic = true
+                                let varName = String(cleanP.dropLast(3)).trimmingCharacters(in: .whitespaces)
+                                params.append(varName.isEmpty ? "__VA_ARGS__" : varName)
                             } else {
                                 params.append(cleanP)
                             }
@@ -266,7 +270,7 @@ public final class CPreprocessor {
                             // Collect balanced arguments
                             if let (args, afterCallIdx) = parseMacroArguments(in: text, openParenIdx: lookAhead) {
                                 i = afterCallIdx
-                                let expandedBody = substituteParameters(macro: macro, args: args)
+                                let expandedBody = substituteParameters(macro: macro, args: args, hideSet: hideSet)
                                 // Rescan with hide-set
                                 let rescanned = expandMacros(in: expandedBody, hideSet: hideSet.union([identifier]))
                                 result.append(rescanned)
@@ -342,19 +346,35 @@ public final class CPreprocessor {
         return nil
     }
     
-    private func substituteParameters(macro: Macro, args: [String]) -> String {
+    private func substituteParameters(macro: Macro, args: [String], hideSet: Set<String> = []) -> String {
         guard let params = macro.parameters else { return macro.replacement }
         var body = macro.replacement
         
         var paramMap: [String: String] = [:]
         for (idx, param) in params.enumerated() {
-            if param == "__VA_ARGS__" {
-                let rest = args.count > idx ? args[idx...].joined(separator: ", ") : ""
-                paramMap["__VA_ARGS__"] = rest
+            let isVa = (param == "__VA_ARGS__" || (macro.isVariadic && idx == params.count - 1))
+            let rawVal: String
+            if isVa {
+                rawVal = args.count > idx ? args[idx...].joined(separator: ", ") : ""
             } else if idx < args.count {
-                paramMap[param] = args[idx]
+                rawVal = args[idx]
             } else {
-                paramMap[param] = ""
+                rawVal = ""
+            }
+            
+            // ISO C99 §6.10.3.1: Arguments are expanded before substitution unless adjacent to # or ##
+            let hasStringify = body.contains("#\(param)") || body.contains("# \(param)")
+            let hasPaste = body.contains("##\(param)") || body.contains("## \(param)") || body.contains("\(param)##") || body.contains("\(param) ##")
+            let effectiveVal: String
+            if hasStringify || hasPaste || rawVal.isEmpty {
+                effectiveVal = rawVal
+            } else {
+                effectiveVal = expandMacros(in: rawVal, hideSet: hideSet)
+            }
+            
+            paramMap[param] = effectiveVal
+            if isVa {
+                paramMap["__VA_ARGS__"] = effectiveVal
             }
         }
         
@@ -369,19 +389,37 @@ public final class CPreprocessor {
             }
         }
         
-        // 2. Token Pasting: a ## b
-        for (param, val) in paramMap {
-            let leftPattern = "\\b\(NSRegularExpression.escapedPattern(for: param))\\s*##"
-            if let regex = try? NSRegularExpression(pattern: leftPattern) {
-                let range = NSRange(body.startIndex..., in: body)
-                body = regex.stringByReplacingMatches(in: body, options: [], range: range, withTemplate: val)
-            }
-            let rightPattern = "##\\s*\\b\(NSRegularExpression.escapedPattern(for: param))\\b"
-            if let regex = try? NSRegularExpression(pattern: rightPattern) {
-                let range = NSRange(body.startIndex..., in: body)
-                body = regex.stringByReplacingMatches(in: body, options: [], range: range, withTemplate: val)
+        // 2. Token Pasting and Comma Swallowing: , ## __VA_ARGS__
+        if let vaVal = paramMap["__VA_ARGS__"] {
+            if vaVal.isEmpty {
+                let commaPattern = ",\\s*##\\s*__VA_ARGS__\\b"
+                if let regex = try? NSRegularExpression(pattern: commaPattern) {
+                    let range = NSRange(body.startIndex..., in: body)
+                    body = regex.stringByReplacingMatches(in: body, options: [], range: range, withTemplate: "")
+                }
+            } else {
+                let commaPattern = ",\\s*##\\s*__VA_ARGS__\\b"
+                if let regex = try? NSRegularExpression(pattern: commaPattern) {
+                    let range = NSRange(body.startIndex..., in: body)
+                    body = regex.stringByReplacingMatches(in: body, options: [], range: range, withTemplate: NSRegularExpression.escapedTemplate(for: ", \(vaVal)"))
+                }
             }
         }
+        
+        // Standard Token Pasting: a ## b
+        for (param, val) in paramMap {
+            let leftPattern = "\\b\(NSRegularExpression.escapedPattern(for: param))\\s*##\\s*"
+            if let regex = try? NSRegularExpression(pattern: leftPattern) {
+                let range = NSRange(body.startIndex..., in: body)
+                body = regex.stringByReplacingMatches(in: body, options: [], range: range, withTemplate: NSRegularExpression.escapedTemplate(for: val))
+            }
+            let rightPattern = "\\s*##\\s*\\b\(NSRegularExpression.escapedPattern(for: param))\\b"
+            if let regex = try? NSRegularExpression(pattern: rightPattern) {
+                let range = NSRange(body.startIndex..., in: body)
+                body = regex.stringByReplacingMatches(in: body, options: [], range: range, withTemplate: NSRegularExpression.escapedTemplate(for: val))
+            }
+        }
+        body = body.replacingOccurrences(of: "\\s*##\\s*", with: "", options: .regularExpression)
         
         // 3. Regular parameter replacement
         for (param, val) in paramMap {

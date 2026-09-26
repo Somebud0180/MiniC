@@ -473,14 +473,22 @@ public final class CStdLib {
 
         // MARK: - stdio additions: sprintf, snprintf, perror, remove, rename
         builtins["sprintf"] = { args in
-            guard args.count >= 2, case .pointer(let destAddr) = args[0] else { return .int(0) }
+            guard args.count >= 2 else { return .int(0) }
+            let destAddr: Int
+            if case .pointer(let a) = args[0] { destAddr = a }
+            else if case .int(let a) = args[0] { destAddr = Int(a) }
+            else { return .int(0) }
             let fmtStr = casePointer(args[1], memory: runtimeIO.memory)
             let formatted = formatPrintf(format: fmtStr, args: Array(args.dropFirst(2)), memory: runtimeIO.memory)
             runtimeIO.memory.writeCString(formatted, to: destAddr)
             return .int(Int64(formatted.utf8.count))
         }
         builtins["snprintf"] = { args in
-            guard args.count >= 3, case .pointer(let destAddr) = args[0] else { return .int(0) }
+            guard args.count >= 3 else { return .int(0) }
+            let destAddr: Int
+            if case .pointer(let a) = args[0] { destAddr = a }
+            else if case .int(let a) = args[0] { destAddr = Int(a) }
+            else { return .int(0) }
             let maxSize = Int(args[1].asInt)
             let fmtStr = casePointer(args[2], memory: runtimeIO.memory)
             let formatted = formatPrintf(format: fmtStr, args: Array(args.dropFirst(3)), memory: runtimeIO.memory)
