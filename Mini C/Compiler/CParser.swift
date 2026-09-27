@@ -591,52 +591,66 @@ public final class CParser {
     
     private func parseTopLevelDeclaration(baseType: CType, isConst: Bool) throws -> CStmt {
         let loc = peek().location
+        var declarations: [CStmt] = []
         
-        // Parse pointer stars in declarator
-        var finalType = baseType
-        while match(.star) {
-            finalType = .pointer(finalType)
-        }
-        
-        guard case .identifier(var name) = advance().type else {
-            throw CCompilerError("Expected identifier in top-level declaration", location: loc)
-        }
-        
-        if match(.colonColon) {
-            guard case .identifier(let member) = advance().type else {
-                throw CCompilerError("Expected identifier after '::'", location: loc)
+        while true {
+            // Parse pointer stars in declarator
+            var finalType = baseType
+            while match(.star) {
+                finalType = .pointer(finalType)
             }
-            name = "\(name)::\(member)"
-        }
-        
-        // Check if function
-        if match(.leftParen) {
-            return try parseFunctionDeclaration(returnType: finalType, name: name, location: loc)
-        }
-        
-        // Check if array
-        if match(.leftBracket) {
-            var size: Int? = nil
-            if case .integerLiteral(let s) = peek().type {
-                advance()
-                size = Int(s)
+            
+            guard case .identifier(var name) = advance().type else {
+                throw CCompilerError("Expected identifier in top-level declaration", location: loc)
             }
-            try consume(.rightBracket, message: "Expected ']' in array declaration")
-            finalType = .array(finalType, size)
-        }
-        
-        // Global variable
-        var initExpr: CExpr? = nil
-        if match(.equal) {
-            if check(.leftBrace) {
-                initExpr = try parseInitializerList()
-            } else {
-                initExpr = try parseExpression()
+            
+            if match(.colonColon) {
+                guard case .identifier(let member) = advance().type else {
+                    throw CCompilerError("Expected identifier after '::'", location: loc)
+                }
+                name = "\(name)::\(member)"
             }
+            
+            // Check if function
+            if match(.leftParen) {
+                if !declarations.isEmpty {
+                    throw CCompilerError("Function declarations cannot appear in a multi-variable declaration", location: loc)
+                }
+                return try parseFunctionDeclaration(returnType: finalType, name: name, location: loc)
+            }
+            
+            // Check if array
+            if match(.leftBracket) {
+                var size: Int? = nil
+                if case .integerLiteral(let s) = peek().type {
+                    advance()
+                    size = Int(s)
+                }
+                try consume(.rightBracket, message: "Expected ']' in array declaration")
+                finalType = .array(finalType, size)
+            }
+            
+            // Global variable
+            var initExpr: CExpr? = nil
+            if match(.equal) {
+                if check(.leftBrace) {
+                    initExpr = try parseInitializerList()
+                } else {
+                    initExpr = try parseExpression()
+                }
+            }
+            
+            declarations.append(.variableDecl(type: finalType, name: name, sizeExpr: nil, initExpr: initExpr, isConst: isConst, loc))
+            
+            if match(.comma) { continue }
+            break
         }
         
         try consume(.semicolon, message: "Expected ';' after variable declaration")
-        return .variableDecl(type: finalType, name: name, sizeExpr: nil, initExpr: initExpr, isConst: isConst, loc)
+        if declarations.count == 1 {
+            return declarations[0]
+        }
+        return .declarationList(declarations, loc)
     }
     
     private func parseMemberVariableDeclaration(baseType: CType, isConst: Bool, loc: SourceLocation) throws -> CStmt {
@@ -874,7 +888,7 @@ public final class CParser {
         if statements.count == 1 {
             return statements[0]
         }
-        return .block(statements, location)
+        return .declarationList(statements, location)
     }
     
     private func parseInitializerList() throws -> CExpr {

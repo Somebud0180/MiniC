@@ -197,7 +197,7 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                 memory.structLayouts[name] = layout
             case .usingNamespace:
                 break
-            case .variableDecl:
+            case .variableDecl, .declarationList:
                 try await executeStatement(decl)
             default:
                 break
@@ -268,6 +268,11 @@ public final class CInterpreter: CRuntimeIO, @unchecked Sendable {
                 try? await blockScope.unwind()
                 currentScope = prevScope
                 throw error
+            }
+            
+        case .declarationList(let statements, _):
+            for s in statements {
+                try await executeStatement(s)
             }
             
         case .variableDecl(let type, let name, let sizeExpr, let initExpr, let isConst, let location):
