@@ -473,6 +473,7 @@ public indirect enum CExpr: Sendable {
 
 public indirect enum CStmt: Sendable {
     case block([CStmt], SourceLocation)
+    case declarationList([CStmt], SourceLocation)
     case variableDecl(type: CType, name: String, sizeExpr: CExpr?, initExpr: CExpr?, isConst: Bool, SourceLocation)
     case expr(CExpr, SourceLocation)
     case ifStmt(condition: CExpr, thenStmt: CStmt, elseStmt: CStmt?, SourceLocation)
@@ -490,6 +491,7 @@ public indirect enum CStmt: Sendable {
     public var location: SourceLocation {
         switch self {
         case .block(_, let loc),
+             .declarationList(_, let loc),
              .variableDecl(_, _, _, _, _, let loc),
              .expr(_, let loc),
              .ifStmt(_, _, _, let loc),
