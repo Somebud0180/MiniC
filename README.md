@@ -14,3 +14,10 @@ Mini C is a C/C++ IDE made for iOS and iPadOS. Featuring a simplified IDE that l
 - Interactive Terminal
 
 <img width="80%" alt="App Screenshot" src="https://github.com/user-attachments/assets/d687fd1c-a4c9-4339-a0d8-b352acd1edb3" />
+
+---
+
+**AI Disclosure**
+
+<sup>AI was used in the development of the app. Some features and sections of the app are wholly made by AI. No AI is, was, and will ever be used to generate images.</sup>
+
