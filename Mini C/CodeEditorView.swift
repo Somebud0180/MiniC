@@ -47,7 +47,7 @@ struct CodeEditorView: View {
             } else {
                 codeEditorBody
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .ignoresSafeArea(.container, edges: [.horizontal, .bottom])
+                    .ignoresSafeArea(.container, edges: .bottom)
                     .overlay(alignment: .bottom) {
                         codeEditorToolbar
                     }
@@ -361,8 +361,8 @@ struct CodeEditorView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            .safeAreaPadding(.horizontal)
-            .padding(.vertical, 8)
+            
+            .padding(8)
             .frame(minHeight: 24)
             .background(Color(uiColor: .secondarySystemBackground))
             .onTapGesture {
