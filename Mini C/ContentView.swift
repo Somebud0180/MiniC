@@ -440,10 +440,16 @@ struct FolderExplorerView: View {
                         }
                     }
                     
-                    HStack(spacing: 8) {
-                        Text(item.formattedSize)
-                        Text("•")
-                        Text(item.formattedDate)
+                    ViewThatFits {
+                        HStack(spacing: 8) {
+                            Text(item.formattedSize)
+                            Text("•")
+                            Text(item.formattedDate)
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.formattedSize)
+                            Text(item.formattedDate)
+                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
