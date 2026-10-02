@@ -1,5 +1,5 @@
 import Foundation
-import OfflineClangCore
+import MiniClang
 
 /// The editor and terminal use the same bundled Clang → WebAssembly engine as the lab.
 @MainActor

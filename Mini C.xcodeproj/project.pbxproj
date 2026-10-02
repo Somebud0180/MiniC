@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		C10000000000000000000004 /* OfflineClangCore in Frameworks */ = {isa = PBXBuildFile; productRef = C10000000000000000000005 /* OfflineClangCore */; };
+		C10000000000000000000004 /* MiniClang in Frameworks */ = {isa = PBXBuildFile; productRef = C10000000000000000000005 /* MiniClang */; };
 		D30000000000000000000000 /* CodeEditorTextView.swift */ = {isa = PBXBuildFile; fileRef = D20000000000000000000000 /* CodeEditorTextView.swift */; };
 		D30000000000000000000001 /* CodeEditorView.swift */ = {isa = PBXBuildFile; fileRef = D20000000000000000000001 /* CodeEditorView.swift */; };
 		D30000000000000000000002 /* ContentView.swift */ = {isa = PBXBuildFile; fileRef = D20000000000000000000002 /* ContentView.swift */; };
@@ -25,7 +25,7 @@
 
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* Mini C.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Mini C.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		AAB39647306FEE8100344124 /* WasmKit.Package.swift.template */ = {isa = PBXFileReference; lastKnownFileType = text; name = WasmKit.Package.swift.template; path = "Mini C/OfflineClang/WasmKit.Package.swift.template"; sourceTree = "<group>"; };
+		AAB39647306FEE8100344124 /* WasmKit.Package.swift.template */ = {isa = PBXFileReference; lastKnownFileType = text; name = WasmKit.Package.swift.template; path = "../MiniClang/WasmKit.Package.swift.template"; sourceTree = "<group>"; };
 		AABA59F33065574F004C2709 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		D20000000000000000000000 /* CodeEditorTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CodeEditorTextView.swift"; sourceTree = "<group>"; };
 		D20000000000000000000001 /* CodeEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CodeEditorView.swift"; sourceTree = "<group>"; };
@@ -46,7 +46,6 @@
 		000000000000000000000010 /* Mini C */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			explicitFolders = (
-				OfflineClang,
 				Tools,
 			);
 			path = "Mini C";
@@ -58,7 +57,7 @@
 		000000000000000130000000 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
-				C10000000000000000000004 /* OfflineClangCore in Frameworks */,
+				C10000000000000000000004 /* MiniClang in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -127,7 +126,7 @@
 			);
 			name = "Mini C";
 			packageProductDependencies = (
-				C10000000000000000000005 /* OfflineClangCore */,
+				C10000000000000000000005 /* MiniClang */,
 			);
 			productName = MyApp;
 			productReference = 000000000000000000000120 /* Mini C.app */;
@@ -158,7 +157,7 @@
 			mainGroup = 000000000000000000000001;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				AAB3C20A306FEF3400344124 /* XCLocalSwiftPackageReference "Mini C/OfflineClang" */,
+				AAB3C20A306FEF3400344124 /* XCLocalSwiftPackageReference "../MiniClang" */,
 			);
 			preferredProjectObjectVersion = 90;
 			productRefGroup = 000000000000000000000020 /* Products */;
@@ -185,10 +184,11 @@
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			inputFileListPaths = (
-				"$(SRCROOT)/Mini C/OfflineClang/Vendor/inputs.xcfilelist",
+				"$(OFFLINE_CLANG_ROOT)/Vendor/inputs.xcfilelist",
 			);
 			inputPaths = (
 				"$(SRCROOT)/Mini C/Tools/embed-offline-clang.sh",
+				"$(OFFLINE_CLANG_ROOT)/Tools/embed-offline-clang.sh",
 			);
 			name = "Embed Offline Clang";
 			outputPaths = (
@@ -363,6 +363,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				OFFLINE_CLANG_ROOT = "$(SRCROOT)/../MiniClang";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 3;
@@ -418,6 +419,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				OFFLINE_CLANG_ROOT = "$(SRCROOT)/../MiniClang";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 3;
@@ -491,17 +493,17 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		AAB3C20A306FEF3400344124 /* XCLocalSwiftPackageReference "Mini C/OfflineClang" */ = {
+		AAB3C20A306FEF3400344124 /* XCLocalSwiftPackageReference "../MiniClang" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = "Mini C/OfflineClang";
+			relativePath = "../MiniClang";
 		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		C10000000000000000000005 /* OfflineClangCore */ = {
+		C10000000000000000000005 /* MiniClang */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = AAB3C20A306FEF3400344124 /* XCLocalSwiftPackageReference "Mini C/OfflineClang" */;
-			productName = OfflineClangCore;
+			package = AAB3C20A306FEF3400344124 /* XCLocalSwiftPackageReference "../MiniClang" */;
+			productName = MiniClang;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

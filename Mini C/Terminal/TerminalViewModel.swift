@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 import Combine
-import OfflineClangCore
+import MiniClang
 
 public struct TerminalEntry: Identifiable, Equatable, Sendable {
     public enum Style: Sendable {

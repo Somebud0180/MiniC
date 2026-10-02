@@ -32,3 +32,17 @@ This provides C99 and C++11 language support within the bundled toolchain and ru
 The terminal supports interactive input, EOF, Stop, and rerun. Runs are bounded by an execution fuel budget, 64 MiB of linear memory, a 1 MiB stack, 256 KiB of output, and 64 KiB of input; source files are limited to 256 KiB.
 
 The bundled compiler supports physical iOS devices and Intel iOS simulators. ARM iOS simulators can run bundled WebAssembly examples but cannot compile source with the current compiler slices.
+
+## Developing with MiniClang
+
+The compiler library is a separate Swift package repository. Keep its checkout alongside this one:
+
+```text
+Xcode/
+  MiniC/
+  MiniClang/
+```
+
+Mini C imports the local `../MiniClang` package and links `MiniClang`. In a fresh setup, clone both repositories into that layout, then run `swift "Mini C/Tools/bootstrap-offline-clang.swift"` from MiniC before building. The wrapper delegates to MiniClang's verified toolchain downloader. Library development and tests run from MiniClang using `swift test`. See its README for standalone usage and embedding requirements.
+
+The app's `OFFLINE_CLANG_ROOT` build setting points its embedding phase at the sibling checkout. If you move the library elsewhere, update both that setting and the local Swift package reference in Xcode.
