@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		C10000000000000000000006 /* commandDictionary.plist in Resources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000007 /* commandDictionary.plist */; };
 		AA7472ED3070111C002E7D45 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA7472E33070111C002E7D45 /* Assets.xcassets */; };
 		AA7472EF3070111C002E7D45 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = AA7472E23070111C002E7D45 /* AppIcon.icon */; };
 		AA7472F03070111C002E7D45 /* SmartCodeStructurer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA7472EB3070111C002E7D45 /* SmartCodeStructurer.swift */; };
@@ -22,10 +21,10 @@
 		AA7472FA3070111C002E7D45 /* FileItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA7472E73070111C002E7D45 /* FileItem.swift */; };
 		AA7472FB3070111C002E7D45 /* CodeEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA7472E53070111C002E7D45 /* CodeEditorView.swift */; };
 		C10000000000000000000004 /* MiniClang in Frameworks */ = {isa = PBXBuildFile; productRef = C10000000000000000000005 /* MiniClang */; };
+		C10000000000000000000006 /* commandDictionary.plist in Resources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000007 /* commandDictionary.plist */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		C10000000000000000000007 /* commandDictionary.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = commandDictionary.plist; sourceTree = "<group>"; };
 		000000000000000000000120 /* Mini C.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Mini C.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA7472DA3070111C002E7D45 /* CCompilerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCompilerService.swift; sourceTree = "<group>"; };
 		AA7472DC3070111C002E7D45 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
@@ -41,6 +40,7 @@
 		AA7472EA3070111C002E7D45 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		AA7472EB3070111C002E7D45 /* SmartCodeStructurer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartCodeStructurer.swift; sourceTree = "<group>"; };
 		AABA59F33065574F004C2709 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		C10000000000000000000007 /* commandDictionary.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = commandDictionary.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -370,7 +370,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -426,7 +426,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
