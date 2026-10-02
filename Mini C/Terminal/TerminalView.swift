@@ -276,6 +276,13 @@ private struct TerminalInputField: UIViewRepresentable {
         }
     }
 
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextField, context: Context) -> CGSize? {
+        // Fill the available width, but keep this single-line field at its
+        // intrinsic height so the bottom inset cannot consume the console.
+        let intrinsic = uiView.intrinsicContentSize
+        return CGSize(width: proposal.width ?? intrinsic.width, height: intrinsic.height)
+    }
+
     final class Coordinator: NSObject, UITextFieldDelegate {
         var parent: TerminalInputField
 

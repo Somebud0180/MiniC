@@ -35,14 +35,18 @@ The bundled compiler supports physical iOS devices and Intel iOS simulators. ARM
 
 ## Developing with MiniClang
 
-The compiler library is a separate Swift package repository. Keep its checkout alongside this one:
+Mini C links the `MiniClang` product from [the hosted Swift package](https://github.com/somebud0180/miniclang), tracking its `main` branch. Xcode resolves the package automatically when opening the project.
 
-```text
-Xcode/
-  MiniC/
-  MiniClang/
+The compiler frameworks and WASI sysroot require a separate download into the resolved package checkout before building. For a reproducible command-line setup, run from MiniC:
+
+```sh
+xcodebuild -resolvePackageDependencies -project "Mini C.xcodeproj" -scheme "Mini C" -derivedDataPath "$PWD/.build"
+swift "Mini C/Tools/bootstrap-offline-clang.swift"
+xcodebuild -project "Mini C.xcodeproj" -scheme "Mini C" -derivedDataPath "$PWD/.build" -destination 'generic/platform=iOS' build
 ```
 
-Mini C imports the local `../MiniClang` package and links `MiniClang`. In a fresh setup, clone both repositories into that layout, then run `swift "Mini C/Tools/bootstrap-offline-clang.swift"` from MiniC before building. The wrapper delegates to MiniClang's verified toolchain downloader. Library development and tests run from MiniClang using `swift test`. See its README for standalone usage and embedding requirements.
+For builds in Xcode, pass its resolved package checkout path to the bootstrap wrapper: `swift "Mini C/Tools/bootstrap-offline-clang.swift" "/path/to/DerivedData/Mini_C-…/SourcePackages/checkouts/miniclang"`. You can locate that checkout from the MiniClang package in Xcode using Show in Finder. Bootstrap again after changing Derived Data locations or resetting package caches.
 
-The app's `OFFLINE_CLANG_ROOT` build setting points its embedding phase at the sibling checkout. If you move the library elsewhere, update both that setting and the local Swift package reference in Xcode.
+The app's `OFFLINE_CLANG_ROOT` build setting points the embedding phase at `$(BUILD_DIR)/../../SourcePackages/checkouts/miniclang`, matching Xcode's default package location within Derived Data. If you use a custom `-clonedSourcePackagesDir`, override `OFFLINE_CLANG_ROOT` with the absolute path to its `checkouts/miniclang` directory and pass that same path to the bootstrap wrapper. See the package README for library development and embedding details.
+
+The embedding phase declares package directories as inputs so a fresh checkout does not depend on the generated `Vendor/inputs.xcfilelist`. If the embedding script reports “Offline SDK missing,” run the bootstrap wrapper with the resolved checkout path shown in that error, then build again.

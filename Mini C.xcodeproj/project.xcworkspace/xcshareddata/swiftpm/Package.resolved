@@ -1,0 +1,15 @@
+{
+  "originHash" : "3ca0e470725b2157d0456656b68282e7891cc657e529c6a774a0012760113b91",
+  "pins" : [
+    {
+      "identity" : "miniclang",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/somebud0180/miniclang.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "5b0e181a86747616ad6a137cb161f3c9112b0a59"
+      }
+    }
+  ],
+  "version" : 3
+}
