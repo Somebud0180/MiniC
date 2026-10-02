@@ -1,0 +1,1064 @@
+import _CWasmKit
+
+/// An execution state of an invocation of exported function.
+///
+/// Each new invocation through exported function has a separate ``Execution``
+/// even though the invocation happens during another invocation.
+struct Execution: ~Copyable {
+    /// The reference to the ``Store`` associated with the execution.
+    let store: StoreRef
+
+    /// The end of the VM stack space.
+    private let stackEnd: UnsafeMutablePointer<StackSlot>
+    /// The error trap thrown during execution.
+    /// This property must not be assigned to be non-nil more than once.
+    /// - Note: If the trap is set, it must be released manually.
+    private var trap: (error: UnsafeRawPointer, sp: Sp)? = nil
+
+    /// The stack of active exception handlers for `try_table` blocks.
+    var exceptionHandlers: [ExceptionHandler] = []
+
+    /// Storage for caught exceptions that may be referenced via `exnref`.
+    var storedExceptions: [WasmKitException] = []
+
+    /// An active exception handler entry registered by a `try_table` block.
+    struct ExceptionHandler {
+        /// The tag to match, `nil` for `catch_all`/`catch_all_ref`.
+        let tag: InternalTag?
+        /// Whether this handler pushes an `exnref` (`catch_ref`/`catch_all_ref`).
+        let isRef: Bool
+        /// The `sp` to restore when this handler catches.
+        let sp: Sp
+        /// The `pc` to jump to when this handler catches.
+        let targetPC: Pc
+        /// The register offset where payload values should be written (relative to `sp`).
+        let payloadRegBase: VReg
+        /// The number of handlers from the same `try_table` directly below this one,
+        /// which go out of scope together with it when it catches.
+        let siblingsBelow: Int
+    }
+
+    #if WasmDebuggingSupport
+        package init(store: StoreRef, stackEnd: UnsafeMutablePointer<StackSlot>) {
+            self.store = store
+            self.stackEnd = stackEnd
+        }
+    #endif
+
+    /// Executes the given closure with a new execution state associated with
+    /// the given ``Store`` instance, running on the given stack.
+    static func with<T>(
+        store: StoreRef,
+        stack: inout ExecutionStack,
+        body: (inout Execution, Sp) throws -> T
+    ) rethrows -> T {
+        var context = Execution(store: store, stackEnd: stack.slots.advanced(by: stack.count))
+        return try body(&context, stack.slots)
+    }
+
+    /// Gets the current instance from the stack pointer.
+    @inline(__always)
+    func currentInstance(sp: Sp) -> InternalInstance {
+        sp.currentInstance.unsafelyUnwrapped
+    }
+
+    struct CallStack: Sequence {
+        /// An iterator for the call frames in the VM stack.
+        struct FrameIterator: IteratorProtocol {
+            struct Element {
+                let pc: Pc
+                let sp: Sp
+            }
+
+            /// The stack pointer currently traversed.
+            private var sp: Sp?
+
+            init(sp: Sp) {
+                self.sp = sp
+            }
+
+            mutating func next() -> Element? {
+                guard let sp = self.sp, let pc = sp.returnPC else {
+                    // Reached the root frame, whose stack pointer is nil.
+                    return nil
+                }
+                self.sp = sp.previousSP
+                return Element(pc: pc, sp: sp)
+            }
+        }
+
+        let sp: Sp
+
+        func makeIterator() -> FrameIterator {
+            FrameIterator(sp: self.sp)
+        }
+    }
+
+    static func captureBacktrace(sp: Sp, store: Store) -> Backtrace {
+        let callStack = CallStack(sp: sp)
+        var symbols: [Backtrace.Symbol] = []
+
+        for frame in callStack {
+            guard let function = frame.sp.currentFunction else {
+                symbols.append(.init(name: nil, address: frame.pc))
+                continue
+            }
+            let symbolName = store.nameRegistry.symbolicate(.wasm(function))
+            symbols.append(.init(name: symbolName, address: frame.pc))
+        }
+        return Backtrace(symbols: symbols)
+    }
+
+    /// Lays the callee's frame-initialisation image (its constants and the
+    /// locals' default values) over the slots right below the new frame's saved
+    /// slots.
+    ///
+    /// The image is one contiguous buffer built at translation time, so this is a
+    /// single copy rather than a `memset` of the locals plus a `memcpy` of the
+    /// pool -- and small images are copied inline. That matters more than it
+    /// looks: even though the images are tiny for some trivial functions, a libc call
+    /// costs several times the copy itself.
+    @inline(__always)
+    private func initializeFrame(sp: Sp, iseq: InstructionSequence) {
+        // The image has the same offsets from its anchor as from `sp`: it starts
+        // at `offset` and ends at the saved slots, `savedSlots`. The head is
+        // copied at the register offset and the tail at constant ones, so no
+        // address has to be computed. See ``InstructionSequence/frameInitAnchor``.
+        let offset = iseq.frameInitOffset
+        let src = iseq.frameInitAnchor
+        let dst = UnsafeMutableRawPointer(sp)
+        let savedSlots = -StackLayout.numberOfSavingSlots * MemoryLayout<UntypedValue>.stride
+        // Straight-line, overlapping head/tail copies. Written out rather than
+        // looped so that no loop remains for the optimizer to turn back into a
+        // `memcpy` call.
+        if offset <= savedSlots - 64 {
+            if offset < savedSlots - 128 {
+                // `copyMemory` rather than `update(from:count:)`: the latter emits
+                // an overlap check that is dead here (the image lives in the iseq
+                // allocation, never on the VM stack).
+                (dst + offset).copyMemory(from: src + offset, byteCount: savedSlots &- offset)
+                return
+            }
+            Self.copy64(dst, src, offset)
+            Self.copy64(dst, src, savedSlots - 64)
+        } else if offset <= savedSlots - 32 {
+            Self.copy32(dst, src, offset)
+            Self.copy32(dst, src, savedSlots - 32)
+        } else if offset <= savedSlots - 16 {
+            Self.copy16(dst, src, offset)
+            Self.copy16(dst, src, savedSlots - 16)
+        } else if offset == savedSlots - 8 {
+            (dst + offset).storeBytes(of: src.load(fromByteOffset: offset, as: UInt64.self), as: UInt64.self)
+        }
+    }
+
+    /// Copies 16 bytes as one unit, so this lowers to a single vector
+    /// load/store pair -- `ldr q`/`str q` on arm64, `movups` on x86-64 -- rather
+    /// than two scalar ones.
+    @inline(__always)
+    private static func copy16(_ dst: UnsafeMutableRawPointer, _ src: UnsafeRawPointer, _ o: Int) {
+        let bytes = src.loadUnaligned(fromByteOffset: o, as: SIMD2<UInt64>.self)
+        dst.storeBytes(of: bytes, toByteOffset: o, as: SIMD2<UInt64>.self)
+    }
+
+    @inline(__always)
+    private static func copy32(_ dst: UnsafeMutableRawPointer, _ src: UnsafeRawPointer, _ o: Int) {
+        copy16(dst, src, o)
+        copy16(dst, src, o &+ 16)
+    }
+
+    @inline(__always)
+    private static func copy64(_ dst: UnsafeMutableRawPointer, _ src: UnsafeRawPointer, _ o: Int) {
+        copy32(dst, src, o)
+        copy32(dst, src, o &+ 32)
+    }
+
+    /// Pushes a new call frame to the VM stack.
+    ///
+    /// - Parameter needsMemoryRestoreOnReturn: whether returning from this frame
+    ///   has to switch `md`/`ms` back, i.e. whether the callee runs in a different
+    ///   instance than the caller. See ``Sp/rawReturnPC``.
+    @inline(__always)
+    func pushFrame(
+        iseq: InstructionSequence,
+        function: EntityHandle<WasmFunctionEntity>,
+        sp: Sp, newSp: Sp, returnPC: Pc,
+        needsMemoryRestoreOnReturn: Bool
+    ) throws -> Sp {
+        try checkStackBoundary(newSp.advanced(by: iseq.maxStackHeight))
+        initializeFrame(sp: newSp, iseq: iseq)
+        newSp.previousSP = sp
+        newSp.setReturnPC(returnPC, needsMemoryRestore: needsMemoryRestoreOnReturn)
+        newSp.currentFunction = function
+        return newSp
+    }
+
+    /// Pops the current frame from the VM stack, restoring `md`/`ms` for the
+    /// caller's instance.
+    ///
+    /// Only the cross-instance return path (``Execution/returnCrossInstance``)
+    /// goes through here; the common intra-module return is ``Execution/_return``,
+    /// which does the same two loads without any of this.
+    @inline(__always)
+    func popFrameRestoringCurrentMemory(sp: inout Sp, pc: inout Pc, md: inout Md, ms: inout Ms) {
+        let oldSp = sp
+        let rawReturnPC = oldSp.rawReturnPC
+        sp = oldSp.previousSP.unsafelyUnwrapped
+        pc = Pc(bitPattern: UInt(rawReturnPC & ~Sp.returnPCNeedsMemoryRestore)).unsafelyUnwrapped
+        guard let instance = sp.currentInstance else {
+            // The root frame of an invocation has no function and no memory; the
+            // next instruction is `endOfExecution`.
+            CurrentMemory.assignNil(md: &md, ms: &ms)
+            return
+        }
+        CurrentMemory.mayUpdateCurrentInstance(instance: instance, md: &md, ms: &ms)
+    }
+}
+
+/// An unmanaged reference to a ``Store`` instance.
+/// - Note: This is used to avoid ARC overhead during VM execution.
+struct StoreRef {
+    private let _value: Unmanaged<Store>
+
+    var value: Store {
+        _value.takeUnretainedValue()
+    }
+
+    init(_ value: __shared Store) {
+        self._value = .passUnretained(value)
+    }
+}
+
+/// A slot of VM stack
+typealias StackSlot = UInt64
+
+/// A slot of code sequence
+typealias CodeSlot = UInt64
+
+/// The "m"emory "d"ata storage intended to be bound to a physical register.
+/// Stores the base address of the default memory of the current execution context.
+typealias Md = UnsafeMutableRawPointer?
+/// The "m"emory "s"ize intended to be bound to a physical register.
+/// Stores the size of the default memory of the current execution context.
+///
+/// Unsigned, matching the `Ms` typedef in `_CWasmKit.h`, so that the bounds check in a
+/// load/store handler is a single unsigned compare: a signed `Ms` made the compiler put a
+/// `tbnz ms, #63` sign test in front of every one of them.
+typealias Ms = UInt
+/// The "s"tack "p"ointer intended to be bound to a physical register.
+/// Stores the base address of the current frame's register storage.
+typealias Sp = UnsafeMutablePointer<StackSlot>
+/// The program counter pointing to the current instruction.
+/// - Note: This pointer is mutable to allow patching the instruction during execution.
+///         For example, "compile" VM instruction lazily compiles the callee function and
+///         replaces the instruction with the "internalCall" instruction to bypass
+///         "is compiled" check on the next execution.
+typealias Pc = UnsafeMutablePointer<CodeSlot>
+
+extension Sp {
+    /// The stack pointer `reg` addresses from this one.
+    @inline(__always)
+    func advanced<R: ShiftedVReg>(by reg: R) -> Sp {
+        UnsafeMutableRawPointer(self).advanced(by: Int(reg.value)).assumingMemoryBound(to: StackSlot.self)
+    }
+
+    subscript<R: FixedWidthInteger>(_ index: R) -> UntypedValue {
+        get {
+            return UntypedValue(storage: self[Int(index)])
+        }
+        nonmutating set {
+            self[Int(index)] = newValue.storage
+            return
+        }
+    }
+
+    subscript<R: ShiftedVReg>(_ index: R) -> UntypedValue {
+        get {
+            return UntypedValue(storage: read(shifted: index))
+        }
+        nonmutating set {
+            write(shifted: index, newValue)
+        }
+    }
+
+    private func read<T: FixedWidthInteger, R: ShiftedVReg>(shifted index: R) -> T {
+        return UnsafeRawPointer(self).advanced(by: Int(index.value)).withMemoryRebound(to: T.self, capacity: 1) {
+            $0.pointee
+        }
+    }
+    private func read<T: FixedWidthInteger, R: FixedWidthInteger>(_ index: R) -> T {
+        return self.advanced(by: Int(index)).withMemoryRebound(to: T.self, capacity: 1) {
+            $0.pointee
+        }
+    }
+    private func write<R: ShiftedVReg>(shifted index: R, _ value: UntypedValue) {
+        UnsafeMutableRawPointer(self).advanced(by: Int(index.value)).storeBytes(of: value.storage, as: UInt64.self)
+    }
+    private func write<R: FixedWidthInteger>(_ index: R, _ value: UntypedValue) {
+        self[Int(index)] = value
+    }
+
+    subscript<R: ShiftedVReg>(i32 index: R) -> UInt32 {
+        get { return read(shifted: index) }
+        nonmutating set { write(shifted: index, .i32(newValue)) }
+    }
+    subscript<R: ShiftedVReg>(i64 index: R) -> UInt64 {
+        get { return read(shifted: index) }
+        nonmutating set { write(shifted: index, .i64(newValue)) }
+    }
+    subscript<R: ShiftedVReg>(f32 index: R) -> Float32 {
+        get { return Float32(bitPattern: read(shifted: index)) }
+        nonmutating set { write(shifted: index, .f32(newValue)) }
+    }
+    subscript<R: ShiftedVReg>(f64 index: R) -> Float64 {
+        get { return Float64(bitPattern: read(shifted: index)) }
+        nonmutating set { write(shifted: index, .f64(newValue)) }
+    }
+
+    /// An `f32` slot as the pair it holds: the value and the slot's zero high
+    /// half, which reads as `+0.0`. Only operations that map `+0.0` to `+0.0`
+    /// may write through it, so that the high half stays zero.
+    subscript<R: ShiftedVReg>(f32x2 index: R) -> SIMD2<Float32> {
+        get { return unsafeBitCast(read(shifted: index) as UInt64, to: SIMD2<Float32>.self) }
+        nonmutating set { write(shifted: index, UntypedValue(storage: unsafeBitCast(newValue, to: UInt64.self))) }
+    }
+
+    /// An `i32` slot as the pair it holds, for the `i32 -> f32` conversions.
+    subscript<R: ShiftedVReg>(i32x2 index: R) -> SIMD2<UInt32> {
+        get { return unsafeBitCast(read(shifted: index) as UInt64, to: SIMD2<UInt32>.self) }
+    }
+
+    /// An `f32` written together with an explicit zero high half.
+    subscript<R: ShiftedVReg>(f32v index: R) -> Float32 {
+        get { return Float32(bitPattern: read(shifted: index)) }
+        nonmutating set {
+            write(shifted: index, UntypedValue(storage: unsafeBitCast(SIMD2<UInt32>(newValue.bitPattern, 0), to: UInt64.self)))
+        }
+    }
+
+    subscript<R: FixedWidthInteger>(i32 index: R) -> UInt32 {
+        get { return read(index) }
+        nonmutating set { write(index, .i32(newValue)) }
+    }
+    subscript<R: FixedWidthInteger>(i64 index: R) -> UInt64 {
+        get { return read(index) }
+        nonmutating set { write(index, .i64(newValue)) }
+    }
+    subscript<R: FixedWidthInteger>(f32 index: R) -> Float32 {
+        get { return Float32(bitPattern: read(index)) }
+        nonmutating set { write(index, .f32(newValue)) }
+    }
+    subscript<R: FixedWidthInteger>(f64 index: R) -> Float64 {
+        get { return Float64(bitPattern: read(index)) }
+        nonmutating set { write(index, .f64(newValue)) }
+    }
+
+    func loadValue(at reg: VReg, type: ValueType) -> Value {
+        switch type {
+        case .v128:
+            let lo = self[reg].storage
+            let hi = self[reg.nextSlot].storage
+            return .v128(V128Storage(lo: lo, hi: hi).value)
+        case .i32, .i64, .f32, .f64, .ref:
+            return self[reg].cast(to: type)
+        }
+    }
+
+    func storeValue(_ value: Value, at reg: VReg, type: ValueType) {
+        switch type {
+        case .v128:
+            guard case .v128(let v) = value else {
+                preconditionFailure("type mismatch: expected v128, got \(value)")
+            }
+            let storage = V128Storage(v)
+            self[reg] = UntypedValue(storage: storage.lo)
+            self[reg.nextSlot] = UntypedValue(storage: storage.hi)
+        case .i32, .i64, .f32, .f64, .ref:
+            self[reg] = UntypedValue(value)
+        }
+    }
+
+    // MARK: - Special slots
+
+    /// The current executing function.
+    var currentFunction: EntityHandle<WasmFunctionEntity>? {
+        get { return EntityHandle<WasmFunctionEntity>(bitPattern: UInt(self[-3].i64)) }
+        nonmutating set { self[-3] = UInt64(UInt(bitPattern: newValue?.bitPattern ?? 0)) }
+    }
+
+    /// The bit of ``rawReturnPC`` that marks a frame whose return has to switch
+    /// `md`/`ms` back to the caller's instance.
+    ///
+    /// A `Pc` points into an instruction sequence of 8-byte `CodeSlot`s, so the
+    /// low three bits of the saved PC are always zero and free to carry a flag.
+    static var returnPCNeedsMemoryRestore: UInt64 { 1 }
+
+    /// The raw saved-PC slot of the current frame: the caller's `Pc` with
+    /// ``returnPCNeedsMemoryRestore`` possibly set. Only ``Execution/popFrame``
+    /// looks at the flag; everything else goes through ``returnPC``.
+    var rawReturnPC: UInt64 {
+        get { return self[-2] }
+        nonmutating set { self[-2] = newValue }
+    }
+
+    /// The return program counter of the current frame.
+    var returnPC: Pc? {
+        get { return Pc(bitPattern: UInt(self[-2] & ~Sp.returnPCNeedsMemoryRestore)) }
+        nonmutating set { self[-2] = UInt64(UInt(bitPattern: newValue)) }
+    }
+
+    /// Records the caller's `Pc` together with whether returning to it has to
+    /// restore `md`/`ms`.
+    nonmutating func setReturnPC(_ pc: Pc, needsMemoryRestore: Bool) {
+        self[-2] = UInt64(UInt(bitPattern: pc)) | (needsMemoryRestore ? Sp.returnPCNeedsMemoryRestore : 0)
+    }
+
+    /// The previous stack pointer of the current frame.
+    var previousSP: Sp? {
+        get { return Sp(bitPattern: UInt(self[-1])) }
+        nonmutating set { self[-1] = UInt64(UInt(bitPattern: newValue)) }
+    }
+
+    var currentInstance: InternalInstance? {
+        currentFunction?.instance
+    }
+}
+
+extension Pc {
+    /// Reads a value from the current program counter and advances the pointer.
+    mutating func read<T>(_: T.Type = T.self) -> T {
+        assert(MemoryLayout<T>.stride == 8)
+        let value = self.withMemoryRebound(to: T.self, capacity: 1) { $0.pointee }
+        self += 1
+        return value
+    }
+
+    func next() -> (Pc, CodeSlot) {
+        return (self.advanced(by: 1), pointee)
+    }
+}
+
+/// Executes a WebAssembly function.
+///
+/// - Parameters:
+///   - store: The store instance.
+///   - function: The function to be executed.
+///   - type: The function type.
+///   - arguments: The arguments to be passed to the function.
+///   - callerInstance: The instance that called the function.
+/// - Returns: The result values of the function.
+@inline(never)
+/// Lays out the root frame, runs the guest and reads its results back.
+private func runRoot(
+    _ stack: inout Execution,
+    sp: Sp,
+    store: StoreRef,
+    handle: InternalFunction,
+    type: FunctionType,
+    arguments: [Value]
+) throws -> [Value] {
+    // Advance the stack pointer to be able to reference negative indices
+    // for saving slots.
+    let sp = sp.advanced(by: StackLayout.numberOfSavingSlots)
+    // Mark root stack pointer and current function as nil.
+    sp.previousSP = nil
+    sp.currentFunction = nil
+    // The callee's parameter area starts at `sp`.
+    let layout = ParameterAreaLayout(type: type)
+    try ParameterAreaLayout.checkFitsVRegRange(layout.size)
+    for (index, argument) in arguments.enumerated() {
+        sp.storeValue(argument, at: layout.paramReg(index), type: type.parameters[index])
+    }
+
+    try withUnsafeTemporaryAllocation(of: CodeSlot.self, capacity: 2) { rootISeq in
+        rootISeq[0] = Instruction.endOfExecution(.init()).headSlot(
+            threadingModel: store.value.engine.configuration.threadingModel
+        )
+        try stack.execute(
+            sp: sp,
+            pc: rootISeq.baseAddress!,
+            handle: handle,
+            type: type
+        )
+    }
+    return type.results.enumerated().map { (i, resultType) in
+        sp.loadValue(at: layout.resultReg(i), type: resultType)
+    }
+}
+
+func executeWasm(
+    store: Store,
+    function handle: InternalFunction,
+    type: FunctionType,
+    arguments: [Value]
+) throws -> [Value] {
+    var stack = ExecutionStack(engine: store.engine)
+    return try executeWasm(
+        store: store, function: handle, type: type, arguments: arguments, stack: &stack)
+}
+
+/// As above, on a stack the caller owns and can use again.
+func executeWasm(
+    store: Store,
+    function handle: InternalFunction,
+    type: FunctionType,
+    arguments: [Value],
+    stack executionStack: inout ExecutionStack
+) throws -> [Value] {
+    // NOTE: `store` variable must not outlive this function
+    let store = StoreRef(store)
+    return try Execution.with(store: store, stack: &executionStack) { (stack, sp) in
+        try runRoot(&stack, sp: sp, store: store, handle: handle, type: type, arguments: arguments)
+    }
+}
+
+extension Execution {
+    #if WasmDebuggingSupport
+
+        /// Counterpart to the free `executeWasm` function but implemented as a method of `Execution`,
+        /// Useful for representation of debugger state that needs to own `Execution`'s memory.
+        mutating func executeWasm(
+            threadingModel: EngineConfiguration.ThreadingModel,
+            function handle: InternalFunction,
+            type: FunctionType,
+            arguments: [Value],
+            sp: Sp,
+            pc: Pc
+        ) throws -> [Value] {
+            // Advance the stack pointer to be able to reference negative indices
+            // for saving slots.
+            let sp = sp.advanced(by: StackLayout.numberOfSavingSlots)
+            // Mark root stack pointer and current function as nil.
+            sp.previousSP = nil
+            sp.currentFunction = nil
+            // The callee's parameter area starts at `sp`.
+            let layout = ParameterAreaLayout(type: type)
+            try ParameterAreaLayout.checkFitsVRegRange(layout.size)
+            for (index, argument) in arguments.enumerated() {
+                sp.storeValue(argument, at: layout.paramReg(index), type: type.parameters[index])
+            }
+
+            try self.execute(
+                sp: sp,
+                pc: pc,
+                handle: handle,
+                type: type
+            )
+
+            return type.results.enumerated().map { (i, resultType) in
+                sp.loadValue(at: layout.resultReg(i), type: resultType)
+            }
+        }
+
+    #endif
+
+    /// A namespace for the "current memory" (Md and Ms) management.
+    enum CurrentMemory {
+        /// Assigns the current memory to the given internal memory.
+        @inline(__always)
+        static func assign(md: inout Md, ms: inout Ms, memory: InternalMemory) {
+            memory.withValue { assign(md: &md, ms: &ms, memory: &$0) }
+        }
+
+        /// Assigns the current memory to the given memory entity.
+        @inline(__always)
+        static func assign(md: inout Md, ms: inout Ms, memory: inout MemoryEntity) {
+            md = memory.baseAddress
+            // For shared memory this is the guard-page reservation, not the committed size,
+            // so the software check never rejects a valid address that another thread just
+            // grew into; the guard pages enforce the real bound. For non-shared memory it is
+            // the committed size (the tight software bound).
+            ms = UInt(bitPattern: memory.boundsCheckLimit)
+            wasmkit_trap_guard_set_current_memory(md, memory.trapGuardReservationSize)
+        }
+
+        /// Assigns the current memory without moving the trap guard, for a memory
+        /// that is not shared: only a shared memory's bounds check relies on faults,
+        /// and the others are checked exactly (see `Execution.selectMemory`).
+        @inline(__always)
+        static func assignKeepingTrapGuard(md: inout Md, ms: inout Ms, memory: inout MemoryEntity) {
+            md = memory.baseAddress
+            ms = UInt(bitPattern: memory.boundsCheckLimit)
+        }
+
+        /// Assigns the current memory to nil.
+        @inline(__always)
+        static func assignNil(md: inout Md, ms: inout Ms) {
+            md = nil
+            ms = 0
+            wasmkit_trap_guard_set_current_memory(md, 0)
+        }
+
+        /// Updates the current memory if the instance has changed.
+        @inline(__always)
+        static func mayUpdateCurrentInstance(
+            instance: InternalInstance,
+            from lastInstance: InternalInstance?,
+            md: inout Md, ms: inout Ms
+        ) {
+            if lastInstance != instance {
+                mayUpdateCurrentInstance(instance: instance, md: &md, ms: &ms)
+            }
+        }
+
+        /// Updates the current memory if the instance has the default memory instance.
+        @inline(__always)
+        static func mayUpdateCurrentInstance(instance: InternalInstance, md: inout Md, ms: inout Ms) {
+            guard let memory = instance.memories.first else {
+                assignNil(md: &md, ms: &ms)
+                return
+            }
+            CurrentMemory.assign(md: &md, ms: &ms, memory: memory)
+        }
+    }
+
+    /// An ``Error`` thrown when the execution normally ends.
+    struct EndOfExecution: Error, @unchecked Sendable {
+        let sp: Sp
+    }
+
+    /// An ``Error`` thrown when a breakpoint is triggered.
+    struct Breakpoint: Error, @unchecked Sendable {
+        let sp: Sp
+        let pc: Pc
+    }
+
+    /// The entry point for the execution of the WebAssembly function.
+    @inline(never)
+    mutating func execute(
+        sp: Sp, pc: Pc,
+        handle: InternalFunction,
+        type: FunctionType
+    ) throws {
+        var sp: Sp = sp
+        var md: Md = nil
+        var ms: Ms = 0
+        var pc = pc
+        (pc, sp) = try invoke(
+            function: handle,
+            callerInstance: nil,
+            arguments: .zero,
+            sp: sp, pc: pc, md: &md, ms: &ms
+        )
+        do {
+            switch self.store.value.engine.configuration.threadingModel {
+            case .direct:
+                try runDirectThreaded(sp: sp, pc: pc, md: md, ms: ms)
+            case .token:
+                try runTokenThreaded(sp: &sp, pc: &pc, md: &md, ms: &ms)
+            }
+        } catch is EndOfExecution {
+            return
+        }
+    }
+
+    /// Starts the main execution loop using the direct threading model.
+    @inline(never)
+    mutating func runDirectThreaded(
+        sp: Sp, pc: Pc, md: Md, ms: Ms
+    ) throws {
+        // The handlers are reached through one of Swift's calling conventions,
+        // which Clang offers for these architectures only. This list is the
+        // Swift-side spelling of WASMKIT_USE_DIRECT_THREADED_CODE in Platform.h,
+        // which decides whether the C names used below exist at all; a target
+        // missing from the C side but present here fails to compile.
+        #if !(arch(i386) || arch(x86_64) || arch(arm) || arch(arm64) || arch(arm64_32))
+            fatalError("Direct threading is not supported on this platform")
+        #else
+            var sp = sp
+            var pc = pc
+            var md = md
+            var ms = ms
+            #if !$Embedded
+                let shouldUseMprotectTrapGuards = store.value.engine.configuration.memoryBoundsChecking == .mprotect
+                let storeValue = store.value
+            #endif
+            while true {
+                let handler = pc.read(wasmkit_tc_exec.self)
+                try withUnsafeMutablePointer(to: &self) { execution in
+                    // The mprotect guards are unavailable where there is no
+                    // operating system to take the signal, and bounds checking
+                    // there is always the software kind, so this arm is dead.
+                    #if !$Embedded
+                        if shouldUseMprotectTrapGuards {
+                            let trapped: Bool = {
+                                let statePtr = UnsafeMutableRawPointer(execution)
+                                var context = WasmKitDirectThreadedTrapGuardContext(
+                                    exec: handler,
+                                    sp: sp,
+                                    pc: pc,
+                                    md: md,
+                                    ms: ms,
+                                    state: statePtr
+                                )
+                                return wasmkit_trap_guard_run(wasmkit_direct_threaded_trap_guard_entry, &context)
+                            }()
+                            if trapped {
+                                throw Trap(.memoryOutOfBounds).withBacktrace(Self.captureBacktrace(sp: sp, store: storeValue))
+                            }
+                        } else {
+                            wasmkit_tc_start(handler, sp, pc, md, ms, execution)
+                        }
+                    #else
+                        wasmkit_tc_start(handler, sp, pc, md, ms, execution)
+                    #endif
+                }
+                guard let (rawError, trappingSp) = self.trap else { return }
+                let error = unsafeBitCast(rawError, to: Error.self)
+                // Manually release the error object because the trap is caught in C and
+                // held as a raw pointer.
+                wasmkit_swift_errorRelease(rawError)
+                self.resetError()
+
+                if let exception = error as? WasmKitException {
+                    if handleException(exception, sp: &sp, pc: &pc, md: &md, ms: &ms) {
+                        continue
+                    }
+                    throw exception
+                }
+                guard let trap = error as? Trap else {
+                    throw error
+                }
+                // Attach backtrace if the thrown error is a trap
+                throw trap.withBacktrace(Self.captureBacktrace(sp: trappingSp, store: store.value))
+            }
+        #endif
+    }
+
+    /// Starts the main execution loop using the token threading model.
+    /// Be careful when modifying this function as it is performance-critical.
+    @inline(__always)
+    mutating func runTokenThreaded(sp: inout Sp, pc: inout Pc, md: inout Md, ms: inout Ms) throws {
+        #if EngineStats
+            var stats = StatsCollector()
+            defer { stats.dump() }
+        #endif
+        var opcode = pc.read(OpcodeID.self)
+        while true {
+            do {
+                while true {
+                    #if EngineStats
+                        stats.track(opcode)
+                    #endif
+                    opcode = try doExecute(opcode, sp: &sp, pc: &pc, md: &md, ms: &ms)
+                }
+            } catch let exception as WasmKitException {
+                if handleException(exception, sp: &sp, pc: &pc, md: &md, ms: &ms) {
+                    opcode = pc.read(OpcodeID.self)
+                    continue
+                }
+                throw exception
+            } catch let trap as Trap {
+                throw trap.withBacktrace(Self.captureBacktrace(sp: sp, store: store.value))
+            }
+        }
+    }
+
+    /// Sets the error trap thrown during execution.
+    ///
+    /// - Note: This function is called by C instruction handlers at most once.
+    /// It's used only when direct threading is enabled.
+    /// - Parameter trap: The error trap thrown during execution.
+    @_silgen_name("wasmkit_execution_state_set_error")
+    mutating func setError(_ rawError: UnsafeRawPointer, sp: Sp) {
+        precondition(self.trap == nil)
+        self.trap = (rawError, sp)
+    }
+
+    /// Used by the debugger to resume execution after breakpoints.
+    mutating func resetError() {
+        self.trap = nil
+    }
+
+    @inline(__always)
+    func checkStackBoundary(_ sp: Sp) throws {
+        guard sp < stackEnd else { throw Trap(.callStackExhausted) }
+    }
+
+    /// Calls `function` whose parameter area starts at `arguments`.
+    ///
+    /// Used where the callee is not known until now, so neither is where its
+    /// `sp` goes: indirect calls and the root frame.
+    ///
+    /// Returns the new program counter and stack pointer.
+    @inline(never)
+    func invoke(
+        function: InternalFunction,
+        callerInstance: InternalInstance?,
+        arguments: VReg,
+        sp: Sp, pc: Pc, md: inout Md, ms: inout Ms
+    ) throws -> (Pc, Sp) {
+        if function.isWasm {
+            let callee = function.wasm
+            let iseq = try callee.ensureCompiled(store: store)
+            return try invokeWasmFunction(
+                function: callee, iseq: iseq, callerInstance: callerInstance,
+                sp: sp, newSp: sp.advanced(by: arguments).advanced(by: iseq.entryOffset),
+                pc: pc, md: &md, ms: &ms
+            )
+        } else {
+            return try invokeHostFunction(
+                function: function.host, parameterArea: sp.advanced(by: arguments),
+                sp: sp, pc: pc, md: &md, ms: &ms
+            )
+        }
+    }
+
+    /// Calls `function`, whose `sp` is at `spAddend` if it is a Wasm function
+    /// and whose parameter area starts at `arguments`.
+    ///
+    /// Returns the new program counter and stack pointer.
+    @inline(never)
+    func invoke(
+        function: InternalFunction,
+        callerInstance: InternalInstance?,
+        arguments: VReg, spAddend: LVReg,
+        sp: Sp, pc: Pc, md: inout Md, ms: inout Ms
+    ) throws -> (Pc, Sp) {
+        if function.isWasm {
+            let callee = function.wasm
+            return try invokeWasmFunction(
+                function: callee, iseq: callee.ensureCompiled(store: store), callerInstance: callerInstance,
+                sp: sp, newSp: sp.advanced(by: spAddend),
+                pc: pc, md: &md, ms: &ms
+            )
+        } else {
+            return try invokeHostFunction(
+                function: function.host, parameterArea: sp.advanced(by: arguments),
+                sp: sp, pc: pc, md: &md, ms: &ms
+            )
+        }
+    }
+
+    @inline(__always)
+    private func invokeHostFunction(
+        function: EntityHandle<HostFunctionEntity>, parameterArea: Sp,
+        sp: Sp, pc: Pc, md: inout Md, ms: inout Ms
+    ) throws -> (Pc, Sp) {
+        try invokeHostFunction(function: function, sp: sp, parameterArea: parameterArea)
+        // A host function may re-enter the guest and grow the caller's
+        // default memory. A malloc-backed memory moves when it grows, so the
+        // cached base and bound would otherwise be left dangling.
+        if let instance = sp.currentInstance {
+            CurrentMemory.mayUpdateCurrentInstance(instance: instance, md: &md, ms: &ms)
+        }
+        return (pc, sp)
+    }
+
+    /// Calls `function` in place of the current frame.
+    ///
+    /// The callee's parameter area starts where the current frame's does, at
+    /// `frameBase`. The arguments are moved there from `arguments`, and the
+    /// callee's `sp` is placed past its own parameter area and locals, with the
+    /// saved slots moved along. See `Documentation/StackLayout.md`.
+    @inline(never)
+    func tailInvoke(
+        function: InternalFunction,
+        callerInstance: InternalInstance?,
+        arguments: VReg,
+        frameBase: LVReg,
+        sp: Sp, pc: Pc, md: inout Md, ms: inout Ms
+    ) throws -> (Pc, Sp) {
+        let parameterArea = sp.advanced(by: frameBase)
+        let argumentSlots = sp.advanced(by: arguments)
+        if function.isWasm {
+            return try tailInvokeWasmFunction(
+                function: function.wasm, callerInstance: callerInstance,
+                parameterArea: parameterArea, argumentSlots: argumentSlots,
+                sp: sp, md: &md, ms: &ms
+            )
+        } else {
+            let host = function.host
+            let layout = host.layout
+            try ParameterAreaLayout.checkFitsVRegRange(layout.size)
+            let newSp = parameterArea.advanced(by: layout.size + StackLayout.numberOfSavingSlots)
+            try checkStackBoundary(newSp)
+            let saved = SavedSlots(of: sp)
+            Self.moveArguments(from: argumentSlots, to: parameterArea, slotCount: layout.parameterSlotCount)
+            saved.store(below: newSp)
+            try invokeHostFunction(function: host, sp: newSp, parameterArea: parameterArea)
+            if let instance = newSp.currentInstance {
+                CurrentMemory.mayUpdateCurrentInstance(instance: instance, md: &md, ms: &ms)
+            }
+            // The next instruction returns from the new frame.
+            return (pc, newSp)
+        }
+    }
+
+    /// The three saved slots of a frame, held while a tail call moves the frame.
+    private struct SavedSlots {
+        let function: StackSlot
+        let returnPC: StackSlot
+        let sp: StackSlot
+
+        init(of sp: Sp) {
+            self.function = sp[-3]
+            self.returnPC = sp[-2]
+            self.sp = sp[-1]
+        }
+
+        func store(below sp: Sp) {
+            sp[-3] = function
+            sp[-2] = returnPC
+            sp[-1] = self.sp
+        }
+    }
+
+    /// Moves the arguments of a tail call to the start of the parameter area.
+    @inline(__always)
+    private static func moveArguments(from argumentSlots: Sp, to parameterArea: Sp, slotCount: Int) {
+        // The arguments are always above the parameter area, so a forward copy
+        // is safe even where the two overlap. There are usually only a few:
+        // copy up to four straight-line, each read before the write that may
+        // land on it, and loop only past that.
+        switch slotCount {
+        case 0:
+            return
+        case 1:
+            parameterArea[0] = argumentSlots[0]
+        case 2:
+            let (a0, a1) = (argumentSlots[0], argumentSlots[1])
+            parameterArea[0] = a0
+            parameterArea[1] = a1
+        case 3:
+            let (a0, a1, a2) = (argumentSlots[0], argumentSlots[1], argumentSlots[2])
+            parameterArea[0] = a0
+            parameterArea[1] = a1
+            parameterArea[2] = a2
+        default:
+            var i = 0
+            while i < slotCount {
+                parameterArea[i] = argumentSlots[i]
+                i &+= 1
+            }
+        }
+    }
+
+    /// Executes the given wasm function in place of the current frame.
+    @inline(__always)
+    private func tailInvokeWasmFunction(
+        function: EntityHandle<WasmFunctionEntity>,
+        callerInstance: InternalInstance?,
+        parameterArea: Sp, argumentSlots: Sp,
+        sp: Sp, md: inout Md, ms: inout Ms
+    ) throws -> (Pc, Sp) {
+        let iseq = try function.ensureCompiled(store: store)
+        let newSp = parameterArea.advanced(by: iseq.entryOffset)
+        try checkStackBoundary(newSp.advanced(by: iseq.maxStackHeight))
+        if newSp == sp {
+            // The callee's frame has the same shape, e.g. a function calling
+            // itself: the arguments and the frame-initialization image end below
+            // the saved slots, which stay where they are.
+            Self.moveArguments(from: argumentSlots, to: parameterArea, slotCount: iseq.parameterSlotCount)
+            initializeFrame(sp: newSp, iseq: iseq)
+        } else {
+            // Read the saved slots before anything moves: the arguments and the
+            // frame-initialization image may both land on them.
+            let saved = SavedSlots(of: sp)
+            Self.moveArguments(from: argumentSlots, to: parameterArea, slotCount: iseq.parameterSlotCount)
+            initializeFrame(sp: newSp, iseq: iseq)
+            saved.store(below: newSp)
+        }
+        newSp.currentFunction = function
+
+        let calleeInstance = function.instance
+        if calleeInstance != callerInstance {
+            // The frame (and with it the saved PC of the *original* caller) is
+            // reused, so the "same instance" promise the original call recorded
+            // no longer holds: force the restore on return. Leaving the flag
+            // alone when the instance does not change keeps a chain of
+            // intra-module tail calls on the fast return path.
+            newSp.rawReturnPC |= Sp.returnPCNeedsMemoryRestore
+            Execution.CurrentMemory.mayUpdateCurrentInstance(instance: calleeInstance, md: &md, ms: &ms)
+        }
+        return (iseq.baseAddress, newSp)
+    }
+
+    /// Executes the given WebAssembly function with its `sp` at `newSp`.
+    @inline(__always)
+    private func invokeWasmFunction(
+        function: EntityHandle<WasmFunctionEntity>,
+        iseq: InstructionSequence,
+        callerInstance: InternalInstance?,
+        sp: Sp, newSp: Sp, pc: Pc, md: inout Md, ms: inout Ms
+    ) throws -> (Pc, Sp) {
+        let calleeInstance = function.instance
+        let switchesInstance = calleeInstance != callerInstance
+        let newSp = try pushFrame(
+            iseq: iseq,
+            function: function,
+            sp: sp,
+            newSp: newSp,
+            returnPC: pc,
+            needsMemoryRestoreOnReturn: switchesInstance
+        )
+        if switchesInstance {
+            Execution.CurrentMemory.mayUpdateCurrentInstance(instance: calleeInstance, md: &md, ms: &ms)
+        }
+        return (iseq.baseAddress, newSp)
+    }
+
+    /// Executes the given host function.
+    ///
+    /// Note that this function does not modify neither the positions of the
+    /// stack pointer nor the program counter.
+    @inline(never)
+    private func invokeHostFunction(
+        function: EntityHandle<HostFunctionEntity>, sp: Sp, parameterArea: Sp
+    ) throws {
+        let parameterTypes = function.parameterTypes
+        let resultTypes = function.resultTypes
+        let layout = function.layout
+        // A Wasm function's frame is checked when the function is translated; a
+        // host function is never translated, so check its parameter area here.
+        try ParameterAreaLayout.checkFitsVRegRange(layout.size)
+        // Built at exact capacity rather than through `enumerated().map`.
+        // That map has no count to reserve from -- `EnumeratedSequence` is a
+        // Sequence, not a Collection -- so it grew the array by appending and
+        // reallocated as it went, on every call a guest made into the host.
+        // For a drawing-heavy cart that is thousands of calls a frame, and the
+        // reallocation was most of what they cost.
+        let instance = self.currentInstance(sp: sp)
+        let caller = Caller(
+            instanceHandle: instance,
+            store: store.value,
+            sp: sp
+        )
+
+        // Both buffers are on the stack, so a call into the host allocates
+        // nothing. A host function written against the array-based API is
+        // wrapped when it is created, so there is only this one shape here.
+        let implementation = function.implementation
+        try withUnsafeTemporaryAllocation(of: Value.self, capacity: parameterTypes.count) {
+            parameters throws -> Void in
+            for index in 0..<parameterTypes.count {
+                parameters.initializeElement(
+                    at: index,
+                    to: parameterArea.loadValue(
+                        at: layout.paramReg(index), type: parameterTypes[index]))
+            }
+            defer { parameters.deinitialize() }
+
+            // Most host functions return nothing -- every drawing call a
+            // fantasy console offers, for one -- so the result buffer and the
+            // store-back loop are skipped rather than run empty.
+            if resultTypes.isEmpty {
+                return try implementation(
+                    caller, UnsafeBufferPointer(parameters), .init(start: nil, count: 0))
+            }
+            return try withUnsafeTemporaryAllocation(of: Value.self, capacity: resultTypes.count) {
+                results throws -> Void in
+                for index in 0..<resultTypes.count {
+                    results.initializeElement(at: index, to: .i32(0))
+                }
+                defer { results.deinitialize() }
+                try implementation(caller, UnsafeBufferPointer(parameters), results)
+                for index in 0..<resultTypes.count {
+                    parameterArea.storeValue(
+                        results[index], at: layout.resultReg(index),
+                        type: resultTypes[index])
+                }
+            }
+        }
+    }
+}

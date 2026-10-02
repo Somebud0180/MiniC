@@ -31,10 +31,10 @@ struct ContentView: View {
                         terminalViewModel: terminalViewModel,
                         fileURL: selectedFileURL,
                         onOpen: { code, fileName in
-                            terminalViewModel.load(code: code, fileName: fileName)
+                            terminalViewModel.load(code: code, fileName: fileName, fileDirectory: selectedFileURL.deletingLastPathComponent())
                         },
                         onRun: { code, fileName in
-                            terminalViewModel.loadAndRun(code: code, fileName: fileName)
+                            terminalViewModel.loadAndRun(code: code, fileName: fileName, fileDirectory: selectedFileURL.deletingLastPathComponent())
                             withAnimation {
                                 columnVisibility = .all
                                 preferredCompactColumn = .detail

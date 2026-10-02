@@ -1,0 +1,1 @@
+int main(void) { volatile unsigned n = 0; for (;;) ++n; }

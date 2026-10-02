@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import OfflineClangCore
 
 public struct TerminalEntry: Identifiable, Equatable, Sendable {
     public enum Style: Sendable {
@@ -10,7 +11,10 @@ public struct TerminalEntry: Identifiable, Equatable, Sendable {
         case stdin
     }
     
-    public let id = UUID()
+    public let id: UUID
+    public init(id: UUID = UUID(), text: String, style: Style) {
+        self.id = id; self.text = text; self.style = style
+    }
     public let text: String
     public let style: Style
     public let timestamp: Date = Date()
@@ -69,120 +73,135 @@ public final class TerminalViewModel: ObservableObject {
     @Published public var inputText: String = ""
     @Published public var currentFileName: String = ""
     
-    private var currentExecutionTask: Task<CompilationResult, Never>? = nil
-    private var currentInterpreter: CInterpreter? = nil
-    private var lastRunSource: String? = nil
-    
+    private var cancellation: Cancellation?
+    private var programInput: ProgramInput?
+    private var generation = UUID()
+    private var lastOutput = ""
+    private var lastRunSource: String?
+    private var lastDirectory: URL?
+    @Published public private(set) var inputEnded = false
+
     public init() {}
-    
+
     public var isRunning: Bool {
         switch status {
-        case .compiling, .running, .waitingForInput:
-            return true
-        default:
-            return false
+        case .compiling, .running, .waitingForInput: return true
+        default: return false
         }
     }
-    
-    public func load(code: String, fileName: String) {
-        if lastRunSource != code && currentFileName != fileName {
+
+    public func load(code: String, fileName: String, fileDirectory: URL? = nil) {
+        if lastRunSource != code || currentFileName != fileName || lastDirectory != fileDirectory {
+            stop()
             clear()
             status = .idle
         }
-        
         lastRunSource = code
         currentFileName = fileName
+        lastDirectory = fileDirectory
     }
-    
-    public func loadAndRun(code: String, fileName: String) {
-        // If already running, cancel previous
+
+    public func loadAndRun(code: String, fileName: String, fileDirectory: URL? = nil) {
         stop()
-        
-        load(code: code, fileName: fileName)
+        load(code: code, fileName: fileName, fileDirectory: fileDirectory)
+        clear()
+        lastOutput = ""
+        let id = UUID(); generation = id
+        let token = Cancellation(), input = ProgramInput()
+        cancellation = token; programInput = input
+        inputText = ""; inputEnded = false
         status = .compiling
-        
-        appendEntry("=== Building \(fileName) ===", style: .system)
-        
-        let (task, interpreter) = CCompilerService.shared.compileAndRun(
-            source: code,
-            fileName: fileName,
-            fileDirectory: FileManagerService.shared.documentsDirectory,
-            onStdout: { [weak self] text in
-                guard let self else { return }
-                Task { @MainActor [weak self] in
-                    self?.appendEntry(text, style: .stdout)
+        appendEntry("=== Clang · \(Language.forFileName(fileName).rawValue) · \(fileName) ===", style: .system)
+        let events = RunEvents(
+            onRunning: { [weak self] in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.generation == id else { return }
+                    self.status = .running
                 }
             },
-            onStderr: { [weak self] text in
-                guard let self else { return }
-                Task { @MainActor [weak self] in
-                    self?.appendEntry(text, style: .stderr)
+            onOutput: { [weak self] text in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.generation == id else { return }
+                    self.updateOutput(text)
                 }
             },
-            onWaitingForInput: { [weak self] isWaiting in
-                guard let self else { return }
-                Task { @MainActor [weak self] in
-                    if isWaiting {
-                        self?.status = .waitingForInput
-                    } else if self?.status == .waitingForInput {
-                        self?.status = .running
-                    }
+            onWaitingForInput: { [weak self] waiting in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.generation == id else { return }
+                    self.status = waiting ? .waitingForInput : .running
                 }
-            }
-        )
-        
-        currentExecutionTask = task
-        currentInterpreter = interpreter
-        status = .running
-        
+            })
         Task {
-            let result = await task.value
-            if Task.isCancelled { return }
-            
-            if result.isSuccess {
-                self.status = .finished(exitCode: result.exitCode)
-                self.appendEntry("=== Process exited with code \(result.exitCode) ===", style: .system)
-            } else if result.exitCode == -1 {
-                self.status = .cancelled
-                self.appendEntry("=== Process terminated ===", style: .system)
+            let result = await CCompilerService.shared.compileAndRun(
+                source: code, fileName: fileName, input: input, fileDirectory: fileDirectory, cancellation: token, events: events)
+            guard generation == id else { return }
+            // Retire callbacks as well as completion handlers from older runs.
+            generation = UUID()
+            programInput = nil; cancellation = nil
+            updateOutput(result.output)
+            if !result.diagnostics.isEmpty { appendEntry(result.diagnostics, style: .stderr) }
+            if token.isCancelled {
+                status = .cancelled
+            } else if let failure = result.failure {
+                status = .error(failure)
+                appendEntry(failure, style: .stderr)
+                appendEntry("=== Compilation or execution failed ===", style: .system)
             } else {
-                self.status = .error(result.error ?? "Compilation failed")
-                self.appendEntry("=== Build failed ===", style: .system)
+                let code = Int(result.exitCode ?? 0)
+                status = .finished(exitCode: code)
+                appendEntry("=== Process exited with code \(code) ===", style: .system)
             }
         }
     }
-    
+
     public func rerun() {
         guard let code = lastRunSource else { return }
-        loadAndRun(code: code, fileName: currentFileName)
+        loadAndRun(code: code, fileName: currentFileName, fileDirectory: lastDirectory)
     }
-    
+
     public func sendInput() {
-        let textToSend = inputText
-        guard !textToSend.isEmpty || status == .waitingForInput else { return }
-        
-        appendEntry(textToSend + "\n", style: .stdin)
-        inputText = ""
-        currentInterpreter?.provideInput(textToSend)
-    }
-    
-    public func stop() {
-        currentInterpreter?.cancel()
-        currentExecutionTask?.cancel()
-        currentExecutionTask = nil
-        currentInterpreter = nil
-        if isRunning {
-            status = .cancelled
-            appendEntry("=== Stopped by user ===", style: .system)
+        guard isRunning, !inputEnded, let programInput else { return }
+        if programInput.send(inputText + "\n") {
+            appendEntry(inputText + "\n", style: .stdin)
+            inputText = ""
+        } else {
+            appendEntry("Input limit reached (64 KiB per run).", style: .system)
         }
     }
-    
+
+    public func finishInput() {
+        guard isRunning, !inputEnded else { return }
+        programInput?.finish(); inputEnded = true
+        appendEntry("=== End of input ===", style: .system)
+    }
+
+    public func stop() {
+        generation = UUID()
+        cancellation?.cancel(); programInput?.finish()
+        cancellation = nil; programInput = nil
+        if isRunning {
+            status = .cancelled
+            appendEntry("=== Stop requested; compiler stages finish cooperatively ===", style: .system)
+        }
+    }
+
     public func clear() {
         entries.removeAll()
     }
-    
+
+    private func updateOutput(_ text: String) {
+        guard text != lastOutput else { return }
+        let delta = String(decoding: text.utf8.dropFirst(lastOutput.utf8.count), as: UTF8.self)
+        lastOutput = text
+        guard !delta.isEmpty else { return }
+        if let last = entries.last, last.style == .stdout {
+            entries[entries.count - 1] = TerminalEntry(id: last.id, text: last.text + delta, style: .stdout)
+        } else {
+            appendEntry(delta, style: .stdout)
+        }
+    }
+
     private func appendEntry(_ text: String, style: TerminalEntry.Style) {
-        // If the last entry has the same style and does not end with newline, we can merge or append
         entries.append(TerminalEntry(text: text, style: style))
     }
 }

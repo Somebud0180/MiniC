@@ -1,0 +1,136 @@
+/// > Note:
+/// <https://webassembly.github.io/spec/core/exec/instructions.html#table-instructions>
+
+import WasmParser
+
+extension Execution {
+    mutating func tableGet(sp: Sp, immediate: Instruction.TableGetOperand) throws {
+        let table = getTable(immediate.tableIndex, sp: sp, store: store.value)
+
+        let elementIndex = try getElementIndex(sp: sp, immediate.index, table)
+
+        let reference = table.reference(at: Int(elementIndex))
+        sp[immediate.result] = UntypedValue(.ref(reference))
+    }
+    mutating func tableSet(sp: Sp, immediate: Instruction.TableSetOperand) throws {
+        let table = getTable(immediate.tableIndex, sp: sp, store: store.value)
+
+        let reference = sp.getReference(immediate.value, type: table.tableType)
+        let elementIndex = try getElementIndex(sp: sp, immediate.index, table)
+        setTableElement(table: table, Int(elementIndex), reference)
+    }
+    mutating func tableSize(sp: Sp, immediate: Instruction.TableSizeOperand) {
+        let table = getTable(immediate.tableIndex, sp: sp, store: store.value)
+        let elementsCount = table.elementCount
+        sp[immediate.result] = UntypedValue(table.limits.isMemory64 ? .i64(UInt64(elementsCount)) : .i32(UInt32(elementsCount)))
+    }
+    mutating func tableGrow(sp: Sp, immediate: Instruction.TableGrowOperand) throws {
+        let table = getTable(immediate.tableIndex, sp: sp, store: store.value)
+
+        let growthSize = sp[immediate.delta].asAddressOffset(table.limits.isMemory64)
+        let growthValue = sp.getReference(immediate.value, type: table.tableType)
+
+        let oldSize = table.elementCount
+        guard try table.withValue({ try $0.grow(by: growthSize, value: growthValue, resourceLimiter: store.value.resourceLimiter) }) else {
+            sp[immediate.result] = UntypedValue(.i32(Int32(-1).unsigned))
+            return
+        }
+        try chargeElementsCopied(growthSize)
+        sp[immediate.result] = UntypedValue(table.limits.isMemory64 ? .i64(UInt64(oldSize)) : .i32(UInt32(oldSize)))
+    }
+    mutating func tableFill(sp: Sp, immediate: Instruction.TableFillOperand) throws {
+        let table = getTable(immediate.tableIndex, sp: sp, store: store.value)
+        let fillCounter = sp[immediate.size].asAddressOffset(table.limits.isMemory64)
+        let fillValue = sp.getReference(immediate.value, type: table.tableType)
+        let startIndex = sp[immediate.destOffset].asAddressOffset(table.limits.isMemory64)
+
+        // A table64 index or count beyond `Int` cannot be in bounds for any table.
+        guard let start = Int(exactly: startIndex), let count = Int(exactly: fillCounter) else {
+            throw Trap(.tableOutOfBounds(Int(clamping: startIndex)))
+        }
+        try table.withValue { try $0.fill(repeating: fillValue, from: start, count: count) }
+        try chargeElementsCopied(fillCounter)
+    }
+    mutating func tableCopy(sp: Sp, immediate: Instruction.TableCopyOperand) throws {
+        let sourceTableIndex = immediate.sourceIndex
+        let destinationTableIndex = immediate.destIndex
+        let store = self.store.value
+        let sourceTable = getTable(sourceTableIndex, sp: sp, store: store)
+        let destinationTable = getTable(destinationTableIndex, sp: sp, store: store)
+
+        let size = sp[immediate.size].asAddressOffset(
+            sourceTable.limits.isMemory64 || destinationTable.limits.isMemory64
+        )
+        let sourceIndex = sp[immediate.sourceOffset].asAddressOffset(sourceTable.limits.isMemory64)
+        let destinationIndex = sp[immediate.destOffset].asAddressOffset(destinationTable.limits.isMemory64)
+
+        guard let source = Int(exactly: sourceIndex), let destination = Int(exactly: destinationIndex),
+            let count = Int(exactly: size)
+        else {
+            throw Trap(.tableOutOfBounds(Int(clamping: destinationIndex)))
+        }
+        try destinationTable.copy(sourceTable, from: source, to: destination, count: count)
+        try chargeElementsCopied(size)
+    }
+    mutating func tableInit(sp: Sp, immediate: Instruction.TableInitOperand) throws {
+        let tableIndex = immediate.tableIndex
+        let segmentIndex = immediate.segmentIndex
+        let destinationTable = getTable(tableIndex, sp: sp, store: store.value)
+        let sourceElement = currentInstance(sp: sp).elementSegments[Int(segmentIndex)]
+
+        let copyCounter = UInt64(sp[immediate.size].i32)
+        let sourceIndex = UInt64(sp[immediate.sourceOffset].i32)
+        let destinationIndex = sp[immediate.destOffset].asAddressOffset(destinationTable.limits.isMemory64)
+
+        guard let destination = Int(exactly: destinationIndex) else {
+            throw Trap(.tableOutOfBounds(Int(clamping: destinationIndex)))
+        }
+        try destinationTable.withValue {
+            try $0.initialize(
+                sourceElement,
+                from: Int(sourceIndex), to: destination,
+                count: Int(copyCounter)
+            )
+        }
+        try chargeElementsCopied(copyCounter)
+    }
+    mutating func tableElementDrop(sp: Sp, immediate: Instruction.TableElementDropOperand) {
+        let segment = currentInstance(sp: sp).elementSegments[Int(immediate.index)]
+        segment.withValue { $0.drop() }
+    }
+
+    fileprivate func setTableElement(
+        table: InternalTable,
+        _ elementIndex: Int,
+        _ reference: Reference
+    ) {
+        table.withValue {
+            $0.elements[elementIndex] = TableEntity.rawValue(reference)
+        }
+    }
+}
+
+extension Execution {
+    fileprivate func getTable(_ tableIndex: UInt32, sp: Sp, store: Store) -> InternalTable {
+        return currentInstance(sp: sp).tables[Int(tableIndex)]
+    }
+
+    fileprivate mutating func getElementIndex(
+        sp: Sp,
+        _ register: VReg, _ table: InternalTable
+    ) throws -> ElementIndex {
+        let elementIndex = sp[register].asAddressOffset(table.limits.isMemory64)
+
+        guard elementIndex < table.elementCount else {
+            throw Trap(.tableOutOfBounds(Int(clamping: elementIndex)))
+        }
+
+        return ElementIndex(elementIndex)
+    }
+}
+
+extension Sp {
+    fileprivate func getReference(_ register: VReg, type: TableType) -> Reference {
+        return self[register].asReference(type.elementType)
+    }
+}

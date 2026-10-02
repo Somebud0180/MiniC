@@ -1,0 +1,5 @@
+.DS_Store
+.build/
+Prototype/OfflineClang/Vendor/
+Prototype/OfflineClang/.downloads/
+Mini C/OfflineClang/Toolchain/

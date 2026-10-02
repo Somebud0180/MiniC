@@ -1,0 +1,246 @@
+import WasmTypes
+
+import struct WasmParser.Import
+
+/// The backtrace of the trap.
+public struct Backtrace: CustomStringConvertible, Sendable {
+    /// A symbol in the backtrace.
+    public struct Symbol: @unchecked Sendable {
+        /// The name of the symbol.
+        public let name: String?
+        let address: Pc
+    }
+
+    /// The symbols in the backtrace.
+    public let symbols: [Symbol]
+
+    /// Textual description of the backtrace.
+    public var description: String {
+        symbols.enumerated().map { (index, symbol) in
+            let name = symbol.name ?? "unknown"
+            return "    \(index): (0x\(String(UInt(bitPattern: symbol.address), radix: 16))) \(name)"
+        }.joined(separator: "\n")
+    }
+}
+
+/// An error that occurs during execution of a WebAssembly module.
+public struct Trap: Error, CustomStringConvertible, Sendable {
+    /// The reason for the trap.
+    package private(set) var reason: TrapReason
+
+    /// The backtrace of the trap.
+    private(set) var backtrace: Backtrace?
+
+    init(_ code: TrapReason, backtrace: Backtrace? = nil) {
+        self.reason = code
+        self.backtrace = backtrace
+    }
+
+    init(_ message: TrapReason.Message, backtrace: Backtrace? = nil) {
+        self.init(.message(message), backtrace: backtrace)
+    }
+
+    /// The description of the trap.
+    public var description: String {
+        var desc = "Trap: \(reason)"
+        if let backtrace = backtrace {
+            desc += "\n\(backtrace)"
+        }
+        return desc
+    }
+
+    func withBacktrace(_ backtrace: Backtrace) -> Trap {
+        var trap = self
+        trap.backtrace = backtrace
+        return trap
+    }
+}
+
+/// An uncaught WebAssembly exception that propagated out of a module.
+public struct WasmKitException: Error, CustomStringConvertible {
+    /// The tag identity, stored as the bit pattern of the tag handle pointer.
+    /// Used only for equality comparison when matching catch clauses.
+    let tagIdentity: Int
+    /// The exception payload values.
+    let payload: [Value]
+
+    init(tag: InternalTag, payload: [Value]) {
+        self.tagIdentity = tag.bitPattern
+        self.payload = payload
+    }
+
+    public var description: String {
+        "wasm exception (payload: [\(Value.descriptionList(payload))])"
+    }
+
+    /// Returns true if this exception's tag matches the given tag handle.
+    func hasTag(_ tag: InternalTag) -> Bool {
+        tagIdentity == tag.bitPattern
+    }
+}
+
+/// A reason for a trap that occurred during execution of a WebAssembly module.
+package enum TrapReason: Error, CustomStringConvertible, Sendable {
+    package struct Message: Sendable {
+        let text: String
+
+        init(_ text: String) {
+            self.text = text
+        }
+    }
+    /// A trap with a string message
+    case message(Message)
+    /// `unreachable` instruction executed
+    case unreachable
+    /// Too deep call stack
+    ///
+    /// Note: When this trap occurs, consider extending ``EngineConfiguration/stackSize``.
+    case callStackExhausted
+    /// Out of bounds table access
+    case tableOutOfBounds(Int)
+    /// Out of bounds memory access
+    case memoryOutOfBounds
+    /// Unaligned atomic memory access
+    case unalignedAtomic
+    /// `call_indirect` instruction called an uninitialized table element.
+    case indirectCallToNull(Int)
+    /// Indirect call type mismatch
+    case typeMismatchCall(actual: FunctionType, expected: FunctionType)
+    /// Integer divided by zero
+    case integerDividedByZero
+    /// Integer overflowed during arithmetic operation
+    case integerOverflow
+    /// Invalid conversion to integer
+    case invalidConversionToInteger
+    /// Execution consumed all of the fuel budgeted by ``Store/fuel``
+    case outOfFuel
+    /// `call_ref` or `return_call_ref` called a null function reference.
+    case nullFunctionReference
+    /// `ref.as_non_null` was given a null reference.
+    case nullReference
+
+    /// The description of the trap reason.
+    package var description: String {
+        switch self {
+        case .message(let message):
+            return message.text
+        case .unreachable:
+            return "unreachable"
+        case .callStackExhausted:
+            return "call stack exhausted"
+        case .memoryOutOfBounds:
+            return "out of bounds memory access"
+        case .unalignedAtomic:
+            return "unaligned atomic"
+        case .integerDividedByZero:
+            return "integer divide by zero"
+        case .integerOverflow:
+            return "integer overflow"
+        case .invalidConversionToInteger:
+            return "invalid conversion to integer"
+        case .outOfFuel:
+            return "out of fuel"
+        case .nullFunctionReference:
+            return "null function reference"
+        case .nullReference:
+            return "null reference"
+        case .indirectCallToNull(let elementIndex):
+            return "indirect call to null element (uninitialized element \(elementIndex))"
+        case .typeMismatchCall(let actual, let expected):
+            return "indirect call type mismatch, expected \(expected), got \(actual)"
+        case .tableOutOfBounds(let index):
+            return "out of bounds table access at \(index) (undefined element)"
+        }
+    }
+}
+
+extension TrapReason.Message {
+    static func initialTableSizeExceedsLimit(numberOfElements: Int) -> Self {
+        Self("initial table size exceeds the resource limit: \(numberOfElements) elements")
+    }
+    static func initialMemorySizeExceedsLimit(byteSize: Int) -> Self {
+        Self("initial memory size exceeds the resource limit: \(byteSize) bytes")
+    }
+    static func parameterTypesMismatch(expected: [ValueType], got: [Value]) -> Self {
+        Self("parameter types don't match, expected [\(ValueType.descriptionList(expected))], got [\(Value.descriptionList(got))]")
+    }
+    static func resultTypesMismatch(expected: [ValueType], got: [Value]) -> Self {
+        Self("result types don't match, expected [\(ValueType.descriptionList(expected))], got [\(Value.descriptionList(got))]")
+    }
+    static var cannotAssignToImmutableGlobal: Self {
+        Self("cannot assign to an immutable global")
+    }
+    static func mmapFailed(reserveBytes: Int) -> Self {
+        Self("failed to reserve \(reserveBytes) bytes of virtual address space for shared memory")
+    }
+    static var sharedMemoryRequiresMprotect: Self {
+        Self("shared memory requires mprotect-based bounds checking, which is unavailable in this configuration")
+    }
+    static var atomicWaitOnUnsharedMemory: Self {
+        Self("`memory.atomic.wait` requires a shared memory")
+    }
+    static func noGlobalExportWithName(globalName: String, instance: Instance) -> Self {
+        Self("no global export with name \(globalName) in a module instance")
+    }
+    static func exportedFunctionNotFound(name: String, instance: Instance) -> Self {
+        Self("exported function \(name) not found in instance")
+    }
+    static func unimplemented(feature: String) -> Self {
+        Self("\(feature) is not implemented yet")
+    }
+}
+
+// Import-resolution failures raised during instantiation and module
+// registration.
+extension WasmKitError.Message {
+    static func missing(moduleName: String, externalName: String) -> Self {
+        Self("unknown import \(moduleName).\(externalName)")
+    }
+    static func incompatibleType(_ importEntry: Import, entity: InternalExternalValue) -> Self {
+        let expected: String
+        switch importEntry.descriptor {
+        case .function:
+            expected = "function"
+        case .global:
+            expected = "global"
+        case .memory:
+            expected = "memory"
+        case .table:
+            expected = "table"
+        case .tag:
+            expected = "tag"
+        }
+        let got: String
+        switch entity {
+        case .function:
+            got = "function"
+        case .global:
+            got = "global"
+        case .memory:
+            got = "memory"
+        case .table:
+            got = "table"
+        case .tag:
+            got = "tag"
+        }
+        return Self("incompatible import type for \(importEntry.module).\(importEntry.name), expected \(expected), got \(got)")
+    }
+    static func incompatibleFunctionType(_ importEntry: Import, actual: FunctionType, expected: FunctionType) -> Self {
+        Self("incompatible import type: function type for \(importEntry.module).\(importEntry.name), expected \(expected), got \(actual)")
+    }
+    static func incompatibleTableType(_ importEntry: Import, actual: TableType, expected: TableType) -> Self {
+        Self("incompatible import type: table type for \(importEntry.module).\(importEntry.name), expected \(expected), got \(actual)")
+    }
+    static func incompatibleMemoryType(_ importEntry: Import, actual: MemoryType, expected: MemoryType) -> Self {
+        Self("incompatible import type: memory type for \(importEntry.module).\(importEntry.name), expected \(expected), got \(actual)")
+    }
+    static func incompatibleGlobalType(_ importEntry: Import, actual: GlobalType, expected: GlobalType) -> Self {
+        Self("incompatible import type: global type for \(importEntry.module).\(importEntry.name), expected \(expected), got \(actual)")
+    }
+    static func importedEntityFromDifferentStore(_ importEntry: Import) -> Self {
+        Self("imported entity from different store: \(importEntry.module).\(importEntry.name)")
+    }
+    static func moduleInstanceAlreadyRegistered(_ name: String) -> Self {
+        Self("a module instance is already registered under a name `\(name)")
+    }
+}

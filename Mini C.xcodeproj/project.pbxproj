@@ -6,14 +6,49 @@
 	objectVersion = 90;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		C10000000000000000000004 /* OfflineClangCore in Frameworks */ = {isa = PBXBuildFile; productRef = C10000000000000000000005 /* OfflineClangCore */; };
+		D30000000000000000000000 /* CodeEditorTextView.swift */ = {isa = PBXBuildFile; fileRef = D20000000000000000000000 /* CodeEditorTextView.swift */; };
+		D30000000000000000000001 /* CodeEditorView.swift */ = {isa = PBXBuildFile; fileRef = D20000000000000000000001 /* CodeEditorView.swift */; };
+		D30000000000000000000002 /* ContentView.swift */ = {isa = PBXBuildFile; fileRef = D20000000000000000000002 /* ContentView.swift */; };
+		D30000000000000000000003 /* FileItem.swift */ = {isa = PBXBuildFile; fileRef = D20000000000000000000003 /* FileItem.swift */; };
+		D30000000000000000000004 /* FileManagerService.swift */ = {isa = PBXBuildFile; fileRef = D20000000000000000000004 /* FileManagerService.swift */; };
+		D30000000000000000000005 /* MiniC.swift */ = {isa = PBXBuildFile; fileRef = D20000000000000000000005 /* MiniC.swift */; };
+		D30000000000000000000006 /* SettingsView.swift */ = {isa = PBXBuildFile; fileRef = D20000000000000000000006 /* SettingsView.swift */; };
+		D30000000000000000000007 /* SmartCodeStructurer.swift */ = {isa = PBXBuildFile; fileRef = D20000000000000000000007 /* SmartCodeStructurer.swift */; };
+		D30000000000000000000008 /* CCompilerService.swift */ = {isa = PBXBuildFile; fileRef = D20000000000000000000008 /* CCompilerService.swift */; };
+		D30000000000000000000009 /* TerminalView.swift */ = {isa = PBXBuildFile; fileRef = D20000000000000000000009 /* TerminalView.swift */; };
+		D3000000000000000000000A /* TerminalViewModel.swift */ = {isa = PBXBuildFile; fileRef = D2000000000000000000000A /* TerminalViewModel.swift */; };
+		D3000000000000000000000B /* Assets.xcassets */ = {isa = PBXBuildFile; fileRef = D2000000000000000000000B /* Assets.xcassets */; };
+		D3000000000000000000000C /* AppIcon.icon */ = {isa = PBXBuildFile; fileRef = D2000000000000000000000C /* AppIcon.icon */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* Mini C.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Mini C.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		AAB39647306FEE8100344124 /* WasmKit.Package.swift.template */ = {isa = PBXFileReference; lastKnownFileType = text; name = WasmKit.Package.swift.template; path = "Mini C/OfflineClang/WasmKit.Package.swift.template"; sourceTree = "<group>"; };
 		AABA59F33065574F004C2709 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		D20000000000000000000000 /* CodeEditorTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CodeEditorTextView.swift"; sourceTree = "<group>"; };
+		D20000000000000000000001 /* CodeEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CodeEditorView.swift"; sourceTree = "<group>"; };
+		D20000000000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ContentView.swift"; sourceTree = "<group>"; };
+		D20000000000000000000003 /* FileItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FileItem.swift"; sourceTree = "<group>"; };
+		D20000000000000000000004 /* FileManagerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FileManagerService.swift"; sourceTree = "<group>"; };
+		D20000000000000000000005 /* MiniC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MiniC.swift"; sourceTree = "<group>"; };
+		D20000000000000000000006 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsView.swift"; sourceTree = "<group>"; };
+		D20000000000000000000007 /* SmartCodeStructurer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SmartCodeStructurer.swift"; sourceTree = "<group>"; };
+		D20000000000000000000008 /* CCompilerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Compiler/CCompilerService.swift"; sourceTree = "<group>"; };
+		D20000000000000000000009 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Terminal/TerminalView.swift"; sourceTree = "<group>"; };
+		D2000000000000000000000A /* TerminalViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Terminal/TerminalViewModel.swift"; sourceTree = "<group>"; };
+		D2000000000000000000000B /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Assets.xcassets"; sourceTree = "<group>"; };
+		D2000000000000000000000C /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.icon; path = "AppIcon.icon"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		000000000000000000000010 /* Mini C */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFolders = (
+				OfflineClang,
+				Tools,
+			);
 			path = "Mini C";
 			sourceTree = "<group>";
 		};
@@ -23,16 +58,39 @@
 		000000000000000130000000 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
+				C10000000000000000000004 /* OfflineClangCore in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		000000000000000000000010 /* Mini C */ = {
+			isa = PBXGroup;
+			children = (
+				D20000000000000000000000 /* CodeEditorTextView.swift */,
+				D20000000000000000000001 /* CodeEditorView.swift */,
+				D20000000000000000000002 /* ContentView.swift */,
+				D20000000000000000000003 /* FileItem.swift */,
+				D20000000000000000000004 /* FileManagerService.swift */,
+				D20000000000000000000005 /* MiniC.swift */,
+				D20000000000000000000006 /* SettingsView.swift */,
+				D20000000000000000000007 /* SmartCodeStructurer.swift */,
+				D20000000000000000000008 /* CCompilerService.swift */,
+				D20000000000000000000009 /* TerminalView.swift */,
+				D2000000000000000000000A /* TerminalViewModel.swift */,
+				D2000000000000000000000B /* Assets.xcassets */,
+				D2000000000000000000000C /* AppIcon.icon */,
+			);
+			path = "Mini C";
+			sourceTree = "<group>";
+		};
+
 		000000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
 				AABA59F33065574F004C2709 /* Info.plist */,
 				000000000000000000000010 /* Mini C */,
+				AAB39646306FEE8100344124 /* Frameworks */,
 				000000000000000000000020 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -45,6 +103,14 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		AAB39646306FEE8100344124 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				AAB39647306FEE8100344124 /* WasmKit.Package.swift.template */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -55,13 +121,14 @@
 				000000000000000120000000 /* Sources */,
 				000000000000000130000000 /* Frameworks */,
 				000000000000000140000000 /* Resources */,
+				C10000000000000000000003 /* Embed Offline Clang */,
 			);
 			buildRules = (
 			);
-			fileSystemSynchronizedGroups = (
-				000000000000000000000010 /* Mini C */,
-			);
 			name = "Mini C";
+			packageProductDependencies = (
+				C10000000000000000000005 /* OfflineClangCore */,
+			);
 			productName = MyApp;
 			productReference = 000000000000000000000120 /* Mini C.app */;
 			productType = "com.apple.product-type.application";
@@ -90,6 +157,9 @@
 			);
 			mainGroup = 000000000000000000000001;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				AAB3C20A306FEF3400344124 /* XCLocalSwiftPackageReference "Mini C/OfflineClang" */,
+			);
 			preferredProjectObjectVersion = 90;
 			productRefGroup = 000000000000000000000020 /* Products */;
 			projectDirPath = "";
@@ -104,14 +174,52 @@
 		000000000000000140000000 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
+				D3000000000000000000000B /* Assets.xcassets */,
+				D3000000000000000000000C /* AppIcon.icon */,
 			);
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		C10000000000000000000003 /* Embed Offline Clang */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			inputFileListPaths = (
+				"$(SRCROOT)/Mini C/OfflineClang/Vendor/inputs.xcfilelist",
+			);
+			inputPaths = (
+				"$(SRCROOT)/Mini C/Tools/embed-offline-clang.sh",
+			);
+			name = "Embed Offline Clang";
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/OfflineClangToolchain",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/OfflineClangToolchain/usr",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/OfflineClangToolchain/examples",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/OfflineClangToolchain/Licenses",
+				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)",
+			);
+			shellPath = /bin/sh;
+			shellScript = (
+				"\"$SRCROOT/Mini C/Tools/embed-offline-clang.sh\"",
+			);
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		000000000000000120000000 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			files = (
+				D30000000000000000000000 /* CodeEditorTextView.swift */,
+				D30000000000000000000001 /* CodeEditorView.swift */,
+				D30000000000000000000002 /* ContentView.swift */,
+				D30000000000000000000003 /* FileItem.swift */,
+				D30000000000000000000004 /* FileManagerService.swift */,
+				D30000000000000000000005 /* MiniC.swift */,
+				D30000000000000000000006 /* SettingsView.swift */,
+				D30000000000000000000007 /* SmartCodeStructurer.swift */,
+				D30000000000000000000008 /* CCompilerService.swift */,
+				D30000000000000000000009 /* TerminalView.swift */,
+				D3000000000000000000000A /* TerminalViewModel.swift */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */
@@ -254,6 +362,7 @@
 		000000000000000111000000 /* Debug configuration for PBXNativeTarget "Mini C" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 3;
@@ -281,6 +390,11 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.6;
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-Wl,-exported_symbol,_MCCompilerEntry",
+					"-Wl,-exported_symbol,_main",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.lagera.MiniC;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -303,6 +417,7 @@
 		000000000000000112000000 /* Release configuration for PBXNativeTarget "Mini C" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 3;
@@ -330,6 +445,11 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.6;
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-Wl,-exported_symbol,_MCCompilerEntry",
+					"-Wl,-exported_symbol,_main",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.lagera.MiniC;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -369,6 +489,21 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		AAB3C20A306FEF3400344124 /* XCLocalSwiftPackageReference "Mini C/OfflineClang" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "Mini C/OfflineClang";
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		C10000000000000000000005 /* OfflineClangCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AAB3C20A306FEF3400344124 /* XCLocalSwiftPackageReference "Mini C/OfflineClang" */;
+			productName = OfflineClangCore;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 000000000000000000000000 /* Project object */;
 }

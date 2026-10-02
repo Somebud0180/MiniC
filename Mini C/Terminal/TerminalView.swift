@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 public struct TerminalView: View {
     @Environment(\.verticalSizeClass) var verticalSizeClass
@@ -6,7 +7,7 @@ public struct TerminalView: View {
     public var onClose: (() -> Void)? = nil
     
     @State private var isHeaderCollapsed: Bool = false
-    @FocusState private var isInputFocused: Bool
+    @State private var isInputFocused = false
     
     public init(viewModel: TerminalViewModel, onClose: (() -> Void)? = nil) {
         self.viewModel = viewModel
@@ -121,7 +122,7 @@ public struct TerminalView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(uiColor: .systemBackground))
-            .onChange(of: viewModel.entries.count) {
+            .onChange(of: viewModel.entries) {
                 withAnimation(.easeOut(duration: 0.15)) {
                     proxy.scrollTo("bottom_anchor", anchor: .bottom)
                 }
@@ -192,20 +193,19 @@ public struct TerminalView: View {
                 .fontWeight(.bold)
                 .foregroundStyle(viewModel.status == .waitingForInput ? .orange : .secondary)
             
-            TextField(
-                viewModel.status == .waitingForInput ? "Enter input for program..." : "Type input...",
-                text: $viewModel.inputText
-            )
-            .font(.system(.body, design: .monospaced))
-            .autocorrectionDisabled(true)
-            .textInputAutocapitalization(.never)
-            .focused($isInputFocused)
-            .onSubmit {
+            TerminalInputField(
+                placeholder: viewModel.status == .waitingForInput ? "Enter input for program..." : "Type input...",
+                text: $viewModel.inputText,
+                isFocused: $isInputFocused,
+                isEnabled: viewModel.isRunning && !viewModel.inputEnded
+            ) {
                 viewModel.sendInput()
             }
-            .disabled(!viewModel.isRunning)
             
-            if !viewModel.inputText.isEmpty {
+            Button("EOF") { viewModel.finishInput() }
+                .disabled(!viewModel.isRunning || viewModel.inputEnded)
+                .help("Close standard input")
+            if viewModel.isRunning && !viewModel.inputEnded {
                 Button(action: {
                     viewModel.sendInput()
                 }) {
@@ -228,5 +228,78 @@ public struct TerminalView: View {
         )
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
+    }
+}
+
+private struct TerminalInputField: UIViewRepresentable {
+    var placeholder: String
+    @Binding var text: String
+    @Binding var isFocused: Bool
+    var isEnabled: Bool
+    var onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeUIView(context: Context) -> UITextField {
+        let field = UITextField()
+        field.delegate = context.coordinator
+        field.font = UIFontMetrics(forTextStyle: .body).scaledFont(
+            for: .monospacedSystemFont(ofSize: 17, weight: .regular)
+        )
+        field.adjustsFontForContentSizeCategory = true
+        field.autocorrectionType = .no
+        field.autocapitalizationType = .none
+        field.returnKeyType = .send
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.addTarget(context.coordinator, action: #selector(Coordinator.textChanged(_:)), for: .editingChanged)
+        return field
+    }
+
+    func updateUIView(_ field: UITextField, context: Context) {
+        context.coordinator.parent = self
+        field.placeholder = placeholder
+        if field.text != text { field.text = text }
+        field.isEnabled = isEnabled
+
+        // Apply focus after SwiftUI's update, using the latest requested state.
+        let coordinator = context.coordinator
+        DispatchQueue.main.async { [weak field] in
+            guard let field else { return }
+            if coordinator.parent.isFocused && coordinator.parent.isEnabled {
+                if !field.isFirstResponder { field.becomeFirstResponder() }
+            } else if field.isFirstResponder {
+                field.resignFirstResponder()
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        var parent: TerminalInputField
+
+        init(_ parent: TerminalInputField) {
+            self.parent = parent
+        }
+
+        @objc func textChanged(_ field: UITextField) {
+            parent.text = field.text ?? ""
+        }
+
+        func textFieldDidBeginEditing(_ textField: UITextField) {
+            parent.isFocused = true
+        }
+
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            parent.isFocused = false
+        }
+
+        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+            parent.text = textField.text ?? ""
+            parent.onSubmit()
+            // Consume Return without ending editing or dismissing the keyboard.
+            return false
+        }
     }
 }

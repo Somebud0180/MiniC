@@ -1,0 +1,37 @@
+add_wasmkit_library(WASI
+  CleanupFailure.swift
+  ThrowingDefer.swift
+  Platform/GuestPath.swift
+  Platform/PlatformMutex.swift
+  Platform/PAL/PALClock.swift
+  Platform/PAL/PALFileDescriptor.swift
+  Platform/PAL/PALTypes.swift
+  Platform/PAL/PALErrnoMapping.swift
+  Platform/PAL/PALPoll.swift
+  Platform/PAL/PALSystemClocks.swift
+  Platform/SandboxPrimitives/Open.swift
+  Platform/SandboxPrimitives/Readlink.swift
+  Platform/SandboxPrimitives/OpenParent.swift
+  Platform/Directory.swift
+  Platform/Entry.swift
+  Platform/File.swift
+  Platform/PlatformTypes.swift
+  Platform/SandboxPrimitives.swift
+  Platform/HostFileSystem.swift
+  MemoryFileSystem/MemoryFileSystem.swift
+  MemoryFileSystem/MemoryFSNodes.swift
+  MemoryFileSystem/MemoryDirEntry.swift
+  MemoryFileSystem/MemoryFileEntry.swift
+  FileSystem.swift
+  GuestMemorySupport.swift
+  GuestBuffers.swift
+  Clock.swift
+  Poll.swift
+  RandomBufferGenerator.swift
+  WASICapability.swift
+  WASI.swift
+  WASIBridgeToHost.swift
+)
+
+target_link_wasmkit_libraries(WASI PUBLIC
+  WasmTypes)
