@@ -26,6 +26,8 @@
 
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* Mini C.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Mini C.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA16E2DB3075436100011C3F /* bootstrap-offline-clang.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "bootstrap-offline-clang.swift"; sourceTree = "<group>"; };
+		AA16E2DC3075436100011C3F /* embed-offline-clang.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "embed-offline-clang.sh"; sourceTree = "<group>"; };
 		AA7472DA3070111C002E7D45 /* CCompilerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CCompilerService.swift; sourceTree = "<group>"; };
 		AA7472DC3070111C002E7D45 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
 		AA7472DD3070111C002E7D45 /* TerminalViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewModel.swift; sourceTree = "<group>"; };
@@ -42,14 +44,6 @@
 		AABA59F33065574F004C2709 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		C10000000000000000000007 /* commandDictionary.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = commandDictionary.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
-
-/* Begin PBXFileSystemSynchronizedRootGroup section */
-		AA16E2D7307542F000011C3F /* Tools */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Tools;
-			sourceTree = "<group>";
-		};
-/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		000000000000000130000000 /* Frameworks */ = {
@@ -78,6 +72,15 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		AA16E2DD3075436100011C3F /* Tools */ = {
+			isa = PBXGroup;
+			children = (
+				AA16E2DB3075436100011C3F /* bootstrap-offline-clang.swift */,
+				AA16E2DC3075436100011C3F /* embed-offline-clang.sh */,
+			);
+			path = Tools;
+			sourceTree = "<group>";
+		};
 		AA7472DB3070111C002E7D45 /* Compiler */ = {
 			isa = PBXGroup;
 			children = (
@@ -99,7 +102,7 @@
 		AA7472EC3070111C002E7D45 /* Mini C */ = {
 			isa = PBXGroup;
 			children = (
-				AA16E2D7307542F000011C3F /* Tools */,
+				AA16E2DD3075436100011C3F /* Tools */,
 				AA7472DB3070111C002E7D45 /* Compiler */,
 				AA7472DE3070111C002E7D45 /* Terminal */,
 				AA7472E23070111C002E7D45 /* AppIcon.icon */,
@@ -129,9 +132,6 @@
 				C10000000000000000000003 /* Embed Offline Clang */,
 			);
 			buildRules = (
-			);
-			fileSystemSynchronizedGroups = (
-				AA16E2D7307542F000011C3F /* Tools */,
 			);
 			name = "Mini C";
 			packageProductDependencies = (
