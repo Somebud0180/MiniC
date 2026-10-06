@@ -43,6 +43,14 @@
 		C10000000000000000000007 /* commandDictionary.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = commandDictionary.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		AA16E2D7307542F000011C3F /* Tools */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Tools;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
 /* Begin PBXFrameworksBuildPhase section */
 		000000000000000130000000 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
@@ -58,7 +66,6 @@
 			children = (
 				AABA59F33065574F004C2709 /* Info.plist */,
 				AA7472EC3070111C002E7D45 /* Mini C */,
-				AAB39646306FEE8100344124 /* Frameworks */,
 				000000000000000000000020 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -92,6 +99,7 @@
 		AA7472EC3070111C002E7D45 /* Mini C */ = {
 			isa = PBXGroup;
 			children = (
+				AA16E2D7307542F000011C3F /* Tools */,
 				AA7472DB3070111C002E7D45 /* Compiler */,
 				AA7472DE3070111C002E7D45 /* Terminal */,
 				AA7472E23070111C002E7D45 /* AppIcon.icon */,
@@ -108,13 +116,6 @@
 			path = "Mini C";
 			sourceTree = "<group>";
 		};
-		AAB39646306FEE8100344124 /* Frameworks */ = {
-			isa = PBXGroup;
-			children = (
-			);
-			name = Frameworks;
-			sourceTree = "<group>";
-		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -128,6 +129,9 @@
 				C10000000000000000000003 /* Embed Offline Clang */,
 			);
 			buildRules = (
+			);
+			fileSystemSynchronizedGroups = (
+				AA16E2D7307542F000011C3F /* Tools */,
 			);
 			name = "Mini C";
 			packageProductDependencies = (
@@ -191,10 +195,6 @@
 			alwaysOutOfDate = 1;
 			inputPaths = (
 				"$(SRCROOT)/Mini C/Tools/embed-offline-clang.sh",
-				"$(OFFLINE_CLANG_ROOT)/Tools/embed-offline-clang.sh",
-				"$(OFFLINE_CLANG_ROOT)/Vendor",
-				"$(OFFLINE_CLANG_ROOT)/Licenses",
-				"$(OFFLINE_CLANG_ROOT)/Tests/MiniClangTests/Fixtures",
 			);
 			name = "Embed Offline Clang";
 			outputPaths = (
@@ -396,7 +396,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.6;
 				MARKETING_VERSION = 1.0;
-				OFFLINE_CLANG_ROOT = "$(BUILD_DIR)/../../SourcePackages/checkouts/miniclang";
+				OFFLINE_CLANG_ROOT = "";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-Wl,-exported_symbol,_MCCompilerEntry",
@@ -452,7 +452,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.6;
 				MARKETING_VERSION = 1.0;
-				OFFLINE_CLANG_ROOT = "$(BUILD_DIR)/../../SourcePackages/checkouts/miniclang";
+				OFFLINE_CLANG_ROOT = "";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-Wl,-exported_symbol,_MCCompilerEntry",
